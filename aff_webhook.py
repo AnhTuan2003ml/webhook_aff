@@ -5,7 +5,7 @@ server API (mặc định http://127.0.0.1:5000):
 
 - ``GET  /api/accounts``                → danh sách tài khoản Zalo.
 - ``GET  /api/groups/personal``         → danh sách nhóm của tài khoản.
-- ``GET  /api/messages/group-latest``   → kiểm tra tin nhắn MỚI NHẤT của nhóm.
+- ``GET  /api/messages/group-since``    → lấy TẤT CẢ tin nhóm mới kể từ mốc msgId.
 - ``POST /api/send-group-message``      → gửi text (+ ảnh) vào nhóm kết quả.
 
 Logic: theo chu kỳ cấu hình, kiểm tra từng NHÓM NGUỒN; tin mới có link
@@ -81,8 +81,9 @@ def _default_settings() -> dict:
         # Mỗi luồng: 1 NHÓM KẾT QUẢ nhận tin từ NHIỀU nhóm nguồn.
         # [{"id", "dest_group_id", "source_group_ids": [...]}]
         "routes": [],
-        # Chu kỳ kiểm tra tính bằng GIÂY (tối thiểu 1s).
-        "interval_seconds": 1,
+        # Chu kỳ kiểm tra tính bằng GIÂY. Mặc định 60s: mỗi 60s quét lại nhóm
+        # nguồn, thấy tin mới thì chuyển đổi link và gửi nhóm đích.
+        "interval_seconds": 60,
         "shopee_aff_id": DEFAULT_SHOPEE_AFF_ID,
         # subId cố định (đối soát click/đơn qua hệ thống) — dùng cho cả Shopee & Lazada.
         "sub_id": DEFAULT_SUB_ID,
@@ -306,9 +307,16 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
     baseline_count = 0
 
     for gid in source_ids:
+        # MỐC đã lưu (msgId). Lần đầu = "0" -> baseline (chỉ tin rất mới).
+        prev = last_by_group.get(gid) or {}
+        since_id = str(prev.get("msgId") or "0") or "0"
+        is_baseline = since_id in ("", "0")
         try:
-            payload = nexus_get("/api/messages/group-latest",
-                                {"groupId": gid, "profileId": acc_ref})
+            # Lấy TẤT CẢ tin có msgId > mốc (Nexus dùng getrecentv2, phân trang lùi
+            # tới mốc) -> không bỏ sót khi có nhiều tin giữa 2 lần quét.
+            payload = nexus_get("/api/messages/group-since",
+                                {"groupId": gid, "profileId": acc_ref,
+                                 "sinceMsgId": since_id})
         except NexusError as exc:
             return _finish(False, str(exc), checkedGroups=checked)
         checked += 1
@@ -317,42 +325,32 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
             with _lock:
                 d = _load_db()
                 _append_log(d, {"groupId": gid, "groupName": gid, "status": "error",
-                                "error": str(payload.get("error") or "group-latest lỗi"),
+                                "error": str(payload.get("error") or "group-since lỗi"),
                                 "links": [], "textPreview": ""})
                 d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
                 _save_db(d)
             continue
 
-        # Lấy DANH SÁCH tin (mới -> cũ) rồi xử lý MỌI tin GỬI SAU tin đã lưu lần
-        # trước (không chỉ tin mới nhất) -> không bỏ sót khi có nhiều tin giữa 2 lần quét.
-        items = payload.get("items")
-        if not isinstance(items, list) or not items:
-            _lt = payload.get("latest") or {}
-            items = [_lt] if _lt else []
-        if not items:
-            continue
-        prev = last_by_group.get(gid) or {}
-        is_baseline = not prev.get("msgId")
-        prev_ts = int(prev.get("ts") or 0)
-        prev_id = str(prev.get("msgId") or "")
-        newest = items[0]
-        # Cập nhật MỐC = tin mới nhất hiện có (lần sau lấy tin gửi sau tin này).
-        last_by_group[gid] = {"msgId": str(newest.get("msgId") or ""),
-                              "ts": int(newest.get("createTime") or 0)}
+        # items: đã sắp CŨ -> MỚI, chỉ gồm tin có msgId > mốc (Nexus lọc sẵn).
+        items = payload.get("items") or []
+        # Cập nhật MỐC = msgId lớn nhất Nexus thấy (kể cả khi không có tin mới)
+        # để lần sau chỉ lấy tin MỚI HƠN, không lặp lại.
+        latest_mark = str(payload.get("latestMsgId") or since_id or "0")
+        last_by_group[gid] = {
+            "msgId": latest_mark,
+            "ts": int(items[-1].get("createTime") or 0) if items else int(prev.get("ts") or 0),
+        }
 
         if is_baseline:
-            # Nhóm MỚI thêm: vẫn chuyển tiếp tin RẤT MỚI (trong _BASELINE_RECENT_MS)
-            # để không bỏ lỡ tin vừa đăng; chỉ bỏ qua lịch sử cũ.
+            # Nhóm MỚI (chưa có mốc): chỉ chuyển tin RẤT MỚI (trong _BASELINE_RECENT_MS),
+            # bỏ qua lịch sử cũ; các lần sau lấy TẤT CẢ tin mới kể từ mốc này.
             recent_cutoff = int(time.time() * 1000) - _BASELINE_RECENT_MS
             new_items = [it for it in items if int(it.get("createTime") or 0) >= recent_cutoff]
             if not new_items:
                 baseline_count += 1
                 continue  # chỉ có tin cũ -> ghi mốc, không chuyển
         else:
-            # Tin gửi SAU mốc trước.
-            new_items = [it for it in items
-                         if int(it.get("createTime") or 0) > prev_ts and str(it.get("msgId") or "") != prev_id]
-        new_items.sort(key=lambda x: int(x.get("createTime") or 0))  # CŨ -> MỚI
+            new_items = list(items)  # Nexus đã lọc msgId > mốc
         if not new_items:
             continue
 
