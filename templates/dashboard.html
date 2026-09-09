@@ -723,10 +723,13 @@ async function loadLogs() {
             return;
         }
         body.innerHTML = logs.map(l => {
-            const links = (l.links || []).map(x => x.ok
-                ? `<div>✅ <a href="${esc(x.aff)}" target="_blank" rel="noopener">${esc(x.aff)}</a></div>`
-                : `<div>❌ <span class="mono">${esc(x.original)}</span> — ${esc(x.error)}</div>`
-            ).join('');
+            const links = (l.links || []).map(x => {
+                if (!x.ok) return `<div>❌ <span class="mono">${esc(x.original)}</span> — ${esc(x.error)}</div>`;
+                // ok nhưng converted === false: giữ nguyên link gốc (không tạo được link aff).
+                const icon = x.converted === false ? '🔁' : '✅';
+                const note = x.converted === false ? ' <span class="small">(giữ nguyên)</span>' : '';
+                return `<div>${icon} <a href="${esc(x.aff)}" target="_blank" rel="noopener">${esc(x.aff)}</a>${note}</div>`;
+            }).join('');
             const statusLabel = { sent: 'Đã gửi', sent_partial: 'Gửi 1 phần', error: 'Lỗi' }[l.status] || l.status;
             return `<tr>
                 <td class="small">${esc(l.at || '')}</td>

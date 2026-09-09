@@ -28,6 +28,11 @@ URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _SHOPEE_HOST_RE = re.compile(r"(?:^|\.)(?:shopee\.vn|shope\.ee|shp\.ee)$", re.IGNORECASE)
 _LAZADA_HOST_RE = re.compile(r"(?:^|\.)(?:lazada\.vn|lazada\.com\.vn)$", re.IGNORECASE)
 _SHORT_HOSTS = {"s.shopee.vn", "shope.ee", "vn.shp.ee", "shp.ee", "s.lazada.vn", "s.lazada.com.vn"}
+# Link rút gọn Lazada (s.lazada.vn/s.XXX?t=h5...) không redirect qua HTTP mà
+# chuyển hướng bằng JS trong trang h5 -> phải tải HTML để lấy URL thật.
+_LAZADA_SHORT_HOSTS = {"s.lazada.vn", "s.lazada.com.vn"}
+_LAZADA_REAL_URL_RE = re.compile(
+    r"https?://(?:pages|www)\.lazada\.(?:vn|com\.vn)/[^\s\"'\\]+", re.IGNORECASE)
 
 LAZADA_CONVERT_URL = "https://adsense.lazada.vn/newOffer/link-convert-v2.json"
 
@@ -74,6 +79,11 @@ def lazada_aff_link_api(url: str, app_key: str, app_secret: str, user_token: str
         return {"ok": False, "message": "Chưa cấu hình Lazada App Key / Secret / User Token."}
 
     product_url = resolve_short_link(url)
+    # Link rút gọn h5 (s.lazada.vn/s.XXX?t=h5) chưa phân giải được ra URL thật
+    # -> tải trang h5 để lấy URL pages/www.lazada.vn (getlink cần URL đầy đủ,
+    # nếu không sẽ báo "Invalid product").
+    if (urlparse(product_url).hostname or "").lower() in _LAZADA_SHORT_HOSTS:
+        product_url = _resolve_lazada_h5(product_url)
     if classify_product_link(product_url) != "lazada":
         return {"ok": False, "message": f"Không phải link Lazada: {product_url[:120]}"}
 
@@ -111,18 +121,29 @@ def lazada_aff_link_api(url: str, app_key: str, app_secret: str, user_token: str
         msg = str(payload.get("message") or payload.get("type") or payload.get("request_id") or "")
         return {"ok": False, "message": f"Lazada Open API lỗi (code={code}) {msg}".strip()}
 
+    # Sản phẩm trả regular/mm/dmPromotionLink; voucher/khuyến mãi (không phải
+    # sản phẩm) trả offerPromotionLink.
     link = (_deep_find(payload, "regularPromotionLink")
             or _deep_find(payload, "mmPromotionLink")
-            or _deep_find(payload, "dmPromotionLink"))
+            or _deep_find(payload, "dmPromotionLink")
+            or _deep_find(payload, "offerPromotionLink")
+            or _deep_find(payload, "promotionLink"))
     if not link:
+        # code=0 nhưng không có link: Lazada không tạo được link aff cho URL này
+        # (voucher/khuyến mãi không nhận dạng được, hoặc short link không phân
+        # giải được). GIỮ NGUYÊN link gốc để tin vẫn được chuyển tiếp.
         err = _deep_find(payload, "errorMsg") or _deep_find(payload, "error_msg")
-        return {"ok": False, "message": f"Lazada không trả về link: {err or json.dumps(payload)[:160]}"}
+        return {"ok": True, "link": _clean_url(url), "productUrl": product_url,
+                "converted": False,
+                "message": f"Giữ nguyên link (Lazada không tạo được link aff: "
+                           f"{err or 'không phải sản phẩm'})"}
 
     link = str(link).strip()
-    # Bảo đảm subId1 có trong link để đối soát (nếu API chưa gắn sẵn).
-    if sub_id and "subId1=" not in link:
+    # Bảo đảm subId1 có trong link để đối soát (nếu API chưa gắn sẵn). Lazada có
+    # thể trả sẵn dạng sub_id1= (gạch dưới) -> không gắn trùng.
+    if sub_id and "subId1=" not in link and "sub_id1=" not in link:
         link += ("&" if "?" in link else "?") + "subId1=" + quote(str(sub_id), safe="")
-    return {"ok": True, "link": link, "productUrl": product_url}
+    return {"ok": True, "link": link, "productUrl": product_url, "converted": True}
 
 
 def _clean_url(url: str) -> str:
@@ -233,6 +254,28 @@ def resolve_short_link(url: str, timeout: int = 15) -> str:
         return final_url or url
     except Exception:
         return url
+
+
+def _resolve_lazada_h5(url: str, timeout: int = 15) -> str:
+    """Lấy URL Lazada THẬT từ trang rút gọn h5 (s.lazada.vn/s.XXX?t=h5...).
+
+    Trang này trả HTTP 200 kèm HTML, không redirect; nó chuyển hướng bằng JS
+    (``window.location.href = 'https://pages.lazada.vn/...'``). Ta tải HTML và
+    trích URL pages/www.lazada.vn đầu tiên để đưa vào API getlink. Lỗi thì trả
+    lại URL ban đầu."""
+    try:
+        response = requests.get(url, headers={"User-Agent": BROWSER_UA},
+                                timeout=timeout, proxies=NO_PROXY)
+        html = response.text or ""
+    except Exception:
+        return url
+    m = re.search(
+        r"""window\.location\.href\s*=\s*["'](https?://(?:pages|www)\.lazada\.[^"']+)["']""",
+        html, re.IGNORECASE)
+    if m:
+        return _clean_url(m.group(1))
+    m2 = _LAZADA_REAL_URL_RE.search(html)
+    return _clean_url(m2.group(0)) if m2 else url
 
 
 def shopee_aff_link(url: str, aff_id: str, sub_id: str = "") -> dict:

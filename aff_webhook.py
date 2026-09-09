@@ -49,6 +49,10 @@ NEXUS_URL = os.environ.get("NEXUS_URL", "http://127.0.0.1:5000").rstrip("/")
 _lock = threading.RLock()
 
 _MAX_LOGS = 200
+# Retry: tin chưa gửi được (không chuyển được link / gửi nhóm đích lỗi) sẽ được
+# thử lại ở các lượt sau; quá _MAX_RETRY lần thì bỏ qua để không kẹt mãi.
+_MAX_RETRY = 3
+_MAX_RETRY_QUEUE = 50
 # Nhóm mới thêm: vẫn chuyển tiếp tin đăng trong khoảng này (mặc định 30 phút);
 # tin cũ hơn coi là lịch sử -> chỉ ghi mốc, không chuyển.
 _BASELINE_RECENT_MS = 30 * 60 * 1000
@@ -148,6 +152,7 @@ def _load_db() -> dict:
     db["settings"] = merged
     db.setdefault("state", {})
     db["state"].setdefault("lastMsgByGroup", {})
+    db["state"].setdefault("retryQueue", [])
     db.setdefault("logs", [])
     db.setdefault("stats", {})
     db["stats"].setdefault("forwarded", 0)
@@ -265,12 +270,112 @@ def _send_to_dest(settings: dict, dest_group_id: str, text: str, thumb: str) -> 
     return {"ok": True, "withPhoto": with_photo}
 
 
+def _convert_message_text(settings: dict, msg: dict):
+    """Chuyển toàn bộ link Shopee/Lazada trong 1 tin thành link aff.
+
+    Trả (raw_text, new_text, conversions, ok_count, links). Dùng chung cho lượt
+    quét mới lẫn lượt retry để logic chuyển link nhất quán.
+    """
+    raw_text = _strip_content_label(msg.get("title"))
+    scan_text = " ".join(filter(None, [raw_text, str(msg.get("href") or "")]))
+    links = extract_product_links(scan_text)
+    conversions = []
+    new_text = raw_text
+    ok_count = 0
+    for item in links:
+        conv = convert_product_link(item["url"], item["platform"], settings)
+        conversions.append(conv)
+        if conv.get("ok"):
+            ok_count += 1
+            if item["url"] in new_text:
+                new_text = new_text.replace(item["url"], conv["link"])
+            else:
+                # Link nằm ở href (link card) — nối vào cuối nội dung.
+                new_text = (new_text + "\n" + conv["link"]).strip()
+    return raw_text, new_text, conversions, ok_count, links
+
+
+def _link_entries(conversions: list) -> list:
+    """Tóm tắt kết quả chuyển link để ghi vào nhật ký."""
+    return [
+        {"platform": c.get("platform"), "original": c.get("original"),
+         "aff": c.get("link", ""), "ok": bool(c.get("ok")),
+         "converted": bool(c.get("converted", True)),
+         "error": "" if c.get("ok") else str(c.get("message") or "")}
+        for c in conversions
+    ]
+
+
+def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict) -> dict:
+    """Chuyển link trong 1 tin rồi gửi vào từng nhóm đích trong ``dest_ids``.
+
+    Trả dict gồm: entries (log), sent_dests, failed_dests (các nhóm chưa gửi
+    được -> cần thử lại), converted_ok (có chuyển được link nào không), no_link.
+    """
+    raw_text, new_text, conversions, ok_count, links = _convert_message_text(settings, msg)
+    out = {"entries": [], "sent_dests": [], "failed_dests": [],
+           "converted_ok": ok_count > 0, "no_link": not links}
+    if not links:
+        return out
+    base = {
+        "groupId": gid, "groupName": gid,
+        "sender": str(msg.get("senderName") or msg.get("senderUid") or ""),
+        "textPreview": (new_text or raw_text)[:220],
+        "links": _link_entries(conversions),
+        "msgId": str(msg.get("msgId") or ""),
+        "msgTs": int(msg.get("createTime") or 0),
+    }
+    if ok_count == 0:
+        entry = dict(base)
+        entry.update({"status": "error",
+                      "error": "Không chuyển được link nào: "
+                               + "; ".join(str(c.get("message") or "") for c in conversions)})
+        out["entries"].append(entry)
+        out["failed_dests"] = list(dest_ids)  # chưa gửi tới nhóm nào
+        return out
+    for dest in dest_ids:
+        sent = _send_to_dest(settings, dest, new_text, str(msg.get("thumb") or ""))
+        entry = dict(base)
+        entry["destGroupId"] = dest
+        if sent.get("ok"):
+            entry.update({
+                "status": "sent" if ok_count == len(conversions) else "sent_partial",
+                "withPhoto": bool(sent.get("withPhoto")), "error": "",
+            })
+            out["sent_dests"].append(dest)
+        else:
+            entry.update({"status": "error", "withPhoto": False,
+                          "error": str(sent.get("message") or "Gửi vào nhóm kết quả thất bại")})
+            out["failed_dests"].append(dest)
+        out["entries"].append(entry)
+    return out
+
+
+def _enqueue_retry(queue: list, gid: str, msg: dict, failed_dests: list) -> None:
+    """Đưa tin chưa gửi được vào hàng đợi thử lại (gộp nếu đã có cùng msgId)."""
+    mid = str(msg.get("msgId") or "")
+    for it in queue:
+        if it.get("gid") == gid and it.get("msgId") == mid:
+            it["pendingDests"] = sorted(set(it.get("pendingDests") or []) | set(failed_dests))
+            return
+    if len(queue) >= _MAX_RETRY_QUEUE:
+        return  # tránh phình hàng đợi
+    queue.append({
+        "gid": gid, "msgId": mid,
+        "msg": {k: msg.get(k) for k in
+                ("title", "href", "thumb", "senderName", "senderUid", "msgId", "createTime")},
+        "pendingDests": list(failed_dests),
+        "attempts": 0,
+    })
+
+
 def run_forward_once(triggered_by: str = "worker") -> dict:
     """Kiểm tra mọi nhóm nguồn 1 lượt, chuyển link và gửi vào nhóm kết quả."""
     with _lock:
         db = _load_db()
         settings = dict(db["settings"])
         last_by_group = dict(db["state"]["lastMsgByGroup"])
+        retry_queue = list(db["state"].get("retryQueue") or [])
 
     def _finish(ok: bool, message: str, **extra) -> dict:
         with _lock:
@@ -361,73 +466,14 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
             if str(latest.get("senderUid") or "") in ("", "0"):
                 continue  # tin của chính tài khoản — bỏ qua để không tự chuyển tiếp
 
-            raw_text = _strip_content_label(latest.get("title"))
-            scan_text = " ".join(filter(None, [raw_text, str(latest.get("href") or "")]))
-            links = extract_product_links(scan_text)
-            if not links:
+            dest_ids = [r["dest_group_id"] for r in routes_by_source[gid]]
+            res = _forward_message(settings, gid, dest_ids, latest)
+            if res["no_link"]:
                 continue  # tin không có link Shopee/Lazada
-
-            conversions = []
-            new_text = raw_text
-            ok_count = 0
-            for item in links:
-                conv = convert_product_link(item["url"], item["platform"], settings)
-                conversions.append(conv)
-                if conv.get("ok"):
-                    ok_count += 1
-                    if item["url"] in new_text:
-                        new_text = new_text.replace(item["url"], conv["link"])
-                    else:
-                        # Link nằm ở href (link card) — nối vào cuối nội dung.
-                        new_text = (new_text + "\n" + conv["link"]).strip()
-
-            def _base_entry() -> dict:
-                return {
-                    "groupId": gid,
-                    "groupName": gid,
-                    "sender": str(latest.get("senderName") or latest.get("senderUid") or ""),
-                    "textPreview": (new_text or raw_text)[:220],
-                    "links": [
-                        {"platform": c.get("platform"), "original": c.get("original"),
-                         "aff": c.get("link", ""), "ok": bool(c.get("ok")),
-                         "error": "" if c.get("ok") else str(c.get("message") or "")}
-                        for c in conversions
-                    ],
-                    "msgId": msg_id,
-                    "msgTs": msg_ts,
-                }
-
-            entries = []
-            if ok_count == 0:
-                errors += 1
-                entry = _base_entry()
-                entry.update({"status": "error",
-                              "error": "Không chuyển được link nào: "
-                                       + "; ".join(str(c.get("message") or "") for c in conversions)})
-                entries.append(entry)
-            else:
-                # Tin thuộc bao nhiêu luồng thì gửi vào bấy nhiêu nhóm kết quả.
-                for route in routes_by_source[gid]:
-                    sent = _send_to_dest(settings, route["dest_group_id"], new_text,
-                                         str(latest.get("thumb") or ""))
-                    entry = _base_entry()
-                    entry["destGroupId"] = route["dest_group_id"]
-                    if sent.get("ok"):
-                        forwarded += 1
-                        entry.update({
-                            "status": "sent" if ok_count == len(conversions) else "sent_partial",
-                            "withPhoto": bool(sent.get("withPhoto")),
-                            "error": "",
-                        })
-                    else:
-                        errors += 1
-                        entry.update({"status": "error", "withPhoto": False,
-                                      "error": str(sent.get("message") or "Gửi vào nhóm kết quả thất bại")})
-                    entries.append(entry)
 
             with _lock:
                 d = _load_db()
-                for entry in entries:
+                for entry in res["entries"]:
                     _append_log(d, entry)
                     if entry["status"].startswith("sent"):
                         d["stats"]["forwarded"] = int(d["stats"]["forwarded"]) + 1
@@ -435,16 +481,72 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                         d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
                 _save_db(d)
 
+            forwarded += len(res["sent_dests"])
+            errors += 1 if not res["converted_ok"] else len(res["failed_dests"])
+            # Tin chưa gửi được -> đưa vào hàng đợi để thử lại ở lượt sau.
+            if res["failed_dests"]:
+                _enqueue_retry(retry_queue, gid, latest, res["failed_dests"])
+
             time.sleep(0.3)  # giãn nhẹ giữa các tin cho API Zalo
+
+    # ── Thử lại các tin lỗi ở lượt trước (retry); quá _MAX_RETRY lần thì bỏ qua ──
+    retried_ok = 0
+    retried_drop = 0
+    if retry_queue:
+        kept = []
+        for it in retry_queue:
+            it["attempts"] = int(it.get("attempts") or 0) + 1
+            r_gid = str(it.get("gid") or "")
+            r_msg = it.get("msg") or {}
+            r_dests = list(it.get("pendingDests") or [])
+            if not r_dests:
+                continue
+            res = _forward_message(settings, r_gid, r_dests, r_msg)
+            # Chỉ ghi log cho nhóm gửi THÀNH CÔNG lần này (tránh phình lỗi mỗi retry).
+            sent_entries = [e for e in res["entries"] if e["status"].startswith("sent")]
+            if sent_entries:
+                with _lock:
+                    d = _load_db()
+                    for e in sent_entries:
+                        e["retry"] = it["attempts"]
+                        _append_log(d, e)
+                        d["stats"]["forwarded"] = int(d["stats"]["forwarded"]) + 1
+                    _save_db(d)
+                forwarded += len(res["sent_dests"])
+                retried_ok += len(res["sent_dests"])
+            remaining = res["failed_dests"]
+            if not remaining:
+                continue  # đã gửi hết -> xong, bỏ khỏi hàng đợi
+            if it["attempts"] >= _MAX_RETRY:
+                retried_drop += 1
+                with _lock:
+                    d = _load_db()
+                    _append_log(d, {
+                        "groupId": r_gid, "groupName": r_gid, "status": "error",
+                        "error": f"Đã bỏ qua sau {it['attempts']} lần thử (không gửi được).",
+                        "links": [], "textPreview": str(r_msg.get("title") or "")[:220],
+                        "msgId": it.get("msgId"), "skipped": True,
+                    })
+                    _save_db(d)
+                continue  # bỏ khỏi hàng đợi
+            it["pendingDests"] = remaining
+            kept.append(it)
+            time.sleep(0.3)
+        retry_queue = kept
 
     with _lock:
         d = _load_db()
         d["state"]["lastMsgByGroup"] = last_by_group
+        d["state"]["retryQueue"] = retry_queue
         _save_db(d)
 
     baseline_note = f", {baseline_count} nhóm ghi mốc lần đầu" if baseline_count else ""
+    retry_note = ""
+    if retried_ok or retried_drop or retry_queue:
+        retry_note = (f" | Thử lại: gửi được {retried_ok}, bỏ qua {retried_drop}, "
+                      f"còn chờ {len(retry_queue)}")
     message = (f"Đã kiểm tra {checked}/{len(source_ids)} nhóm nguồn của {len(routes)} luồng: "
-               f"{new_messages} tin mới, chuyển tiếp {forwarded}, lỗi {errors}{baseline_note}.")
+               f"{new_messages} tin mới, chuyển tiếp {forwarded}, lỗi {errors}{baseline_note}{retry_note}.")
     return _finish(True, message, checkedGroups=checked, newMessages=new_messages,
                    forwarded=forwarded, errors=errors)
 
