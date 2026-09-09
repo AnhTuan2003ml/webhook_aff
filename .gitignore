@@ -1,0 +1,13 @@
+# Runtime state & secrets (cookie/token đã lưu) — KHÔNG commit
+data/
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Artifacts
+*.zip

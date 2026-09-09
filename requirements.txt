@@ -1,0 +1,3 @@
+# Aff Forwarder Webhook - cai dat:  pip install -r webhook\requirements.txt
+flask>=2.2
+requests>=2.28

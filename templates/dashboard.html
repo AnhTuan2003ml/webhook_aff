@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aff Forwarder - Webhook</title>
+<style>
+    :root {
+        --bg: #f4f7fb; --card: #ffffff; --border: #dce5ef; --text: #16222f;
+        --muted: #5b6b81; --accent: #1f6feb; --accent-dark: #1558c0;
+        --ok: #16a34a; --err: #dc2626; --warn: #b45309;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body {
+        margin: 0; background: var(--bg); color: var(--text);
+        font: 13.5px/1.5 "Segoe UI", system-ui, Arial, sans-serif;
+    }
+    .wrap { max-width: 1360px; margin: 0 auto; padding: 16px 16px 32px; }
+    h2 { font-size: 14px; margin: 0; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+        padding: 14px; box-shadow: 0 1px 2px rgba(15,23,42,.04); }
+
+    /* ── Header 1 hàng ── */
+    .bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .brand { font-size: 17px; font-weight: 800; white-space: nowrap; }
+    .brand .beta { font-size: 10px; font-weight: 800; letter-spacing: .05em; color: var(--warn);
+        border: 1px solid #fcd34d; background: #fffbeb; border-radius: 999px; padding: 2px 8px;
+        vertical-align: 2px; margin-left: 6px; }
+    .spacer { flex: 1; }
+    .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border);
+        border-radius: 999px; height: 32px; padding: 0 12px; font-size: 12px; color: var(--muted);
+        background: #fff; white-space: nowrap; cursor: default; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #cbd5e1; flex-shrink: 0; }
+    .dot.ok { background: var(--ok); } .dot.err { background: var(--err); }
+    .chip.mode-on { border-color: #6ee7b7; background: #ecfdf5; color: #065f46; }
+    .chip.mode-off { border-color: #fdba74; background: #fff7ed; color: #9a3412; }
+
+    .btn { border: 1px solid var(--border); border-radius: 9px; background: #fff; color: var(--text);
+        font: inherit; font-weight: 700; height: 34px; padding: 0 13px; cursor: pointer; white-space: nowrap; }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover { background: var(--accent-dark); color: #fff; }
+    .btn:disabled { opacity: .55; cursor: not-allowed; }
+    .btn.mini { height: 26px; padding: 0 9px; font-size: 11.5px; font-weight: 600; border-radius: 7px; }
+    .btn.icon { width: 34px; padding: 0; }
+
+    .switch { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border);
+        border-radius: 9px; background: #fff; height: 34px; padding: 0 11px; cursor: pointer; user-select: none; }
+    .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+    .track { position: relative; width: 32px; height: 18px; border-radius: 99px; background: #cbd5e1;
+        transition: background .18s; flex-shrink: 0; }
+    .track::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+        border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(15,23,42,.25); transition: transform .18s; }
+    .switch input:checked ~ .track { background: var(--ok); }
+    .switch input:checked ~ .track::after { transform: translateX(14px); }
+    .switch .st { font-size: 12px; font-weight: 700; color: var(--muted); }
+    .switch input:checked ~ .st { color: var(--ok); }
+
+    .statusbar { display: none; border-radius: 10px; padding: 8px 12px; font-size: 12.5px;
+        margin-bottom: 12px; border: 1px solid; }
+    .statusbar.ok { display: block; background: #ecfdf5; border-color: #6ee7b7; color: #065f46; }
+    .statusbar.err { display: block; background: #fef2f2; border-color: #fca5a5; color: #991b1b; }
+    .statusbar.info { display: block; background: #eff6ff; border-color: #93c5fd; color: #1e40af; }
+
+    /* ── Bố cục 2 cột ── */
+    .layout { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 14px; align-items: start; }
+    @media (max-width: 1000px) { .layout { grid-template-columns: 1fr; } }
+
+    /* ── Cột cài đặt ── */
+    label.fl { display: block; font-size: 11.5px; font-weight: 700; color: var(--muted); margin: 12px 0 4px; }
+    .settings-card > label.fl:first-of-type { margin-top: 10px; }
+    input[type=text], select, textarea {
+        width: 100%; border: 1px solid var(--border); border-radius: 9px;
+        background: #fff; color: var(--text); font: inherit; padding: 0 10px; height: 34px;
+    }
+    textarea { height: auto; padding: 7px 10px; resize: vertical; min-height: 60px; font-size: 11.5px; }
+    input:focus, select:focus, textarea:focus { outline: 2px solid rgba(31,111,235,.3); border-color: var(--accent); }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .inline { display: flex; gap: 6px; }
+    .inline input { flex: 1; min-width: 0; }
+    .cookie-line { display: flex; align-items: center; gap: 8px; height: 34px; border: 1px solid var(--border);
+        border-radius: 9px; padding: 0 10px; font-size: 12px; color: var(--muted); background: #fbfdff; }
+    .cookie-line .ck-state { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cookie-line .ck-state.ok { color: var(--ok); font-weight: 700; }
+    .save-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+    .save-row .btn { flex: 1; }
+    .small { font-size: 11.5px; color: var(--muted); }
+    .mono { font-family: Consolas, monospace; font-size: 11px; word-break: break-all; }
+
+    /* ── Luồng: thẻ flow nguồn → kết quả ── */
+    .routes-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .routes-head .hint { flex: 1; min-width: 0; font-size: 11.5px; color: var(--muted);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .flow-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .flow-card { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border);
+        border-radius: 11px; background: #fbfdff; padding: 7px 9px; cursor: pointer; max-width: 300px; }
+    .flow-card:hover { border-color: rgba(31,111,235,.5); }
+    .flow-card.active { border-color: var(--accent); background: rgba(31,111,235,.08);
+        box-shadow: 0 0 0 1px var(--accent) inset; }
+    .fc-srcs { display: flex; align-items: center; flex-shrink: 0; }
+    .fc-srcs img, .fc-srcs .fc-more, .fc-none {
+        width: 24px; height: 24px; border-radius: 7px; border: 2px solid #fff;
+        object-fit: cover; background: #e8eef6; margin-left: -7px; }
+    .fc-srcs img:first-child, .fc-srcs .fc-more:first-child { margin-left: 0; }
+    .fc-more { display: inline-flex; align-items: center; justify-content: center;
+        font-size: 9.5px; font-weight: 800; color: var(--accent); background: #e7f0fe; }
+    .fc-none { display: inline-flex; align-items: center; justify-content: center; margin-left: 0;
+        color: var(--warn); font-size: 12px; border-style: dashed; border-color: #fcd34d; background: #fffbeb; }
+    .fc-arrow { color: var(--accent); font-weight: 800; flex-shrink: 0; }
+    .fc-dest { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .fc-dest img { width: 26px; height: 26px; border-radius: 8px; object-fit: cover;
+        border: 1px solid var(--border); background: #e8eef6; flex-shrink: 0; }
+    .fc-name { font-size: 12px; font-weight: 700; overflow: hidden; text-overflow: ellipsis;
+        white-space: nowrap; max-width: 150px; }
+    .fc-name.unset { color: var(--warn); }
+    .fc-del { border: 0; background: transparent; color: var(--muted); cursor: pointer;
+        font-size: 13px; padding: 2px 5px; border-radius: 6px; flex-shrink: 0; }
+    .fc-del:hover { background: #fef2f2; color: var(--err); }
+    .flow-add { display: inline-flex; align-items: center; gap: 6px; border: 1px dashed #b6c9de;
+        border-radius: 11px; background: transparent; color: var(--accent); font: inherit;
+        font-weight: 700; font-size: 12px; padding: 7px 13px; cursor: pointer; }
+    .flow-add:hover { background: rgba(31,111,235,.06); border-color: var(--accent); }
+
+    /* ── Editor 2 bước ── */
+    .route-editor { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    @media (max-width: 760px) { .route-editor { grid-template-columns: 1fr; } }
+    .editor-empty { grid-column: 1 / -1; border: 1px dashed var(--border); border-radius: 11px;
+        background: #fbfdff; display: flex; align-items: center; justify-content: center;
+        min-height: 150px; color: var(--muted); font-size: 12px; text-align: center; padding: 12px; }
+    .group-panel { border: 1px solid var(--border); border-radius: 11px; background: #fbfdff;
+        display: flex; flex-direction: column; overflow: hidden; }
+    .gp-head { display: flex; align-items: center; gap: 7px; padding: 8px 10px;
+        border-bottom: 1px solid var(--border); background: #f2f6fb; flex-wrap: wrap; }
+    .gp-head .t { font-weight: 800; font-size: 12px; }
+    .gp-head .c { font-size: 11px; color: var(--muted); flex: 1; min-width: 0;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .step-no { display: inline-flex; align-items: center; justify-content: center;
+        width: 17px; height: 17px; border-radius: 50%; background: var(--accent); color: #fff;
+        font-size: 10.5px; font-weight: 800; flex-shrink: 0; }
+    .gp-search { padding: 7px 8px; border-bottom: 1px solid var(--border); }
+    .gp-search input { height: 30px; font-size: 12px; border-radius: 8px; }
+    .gp-list { height: 236px; overflow-y: auto; padding: 5px; display: flex; flex-direction: column; gap: 2px; }
+    .g-item { display: flex; align-items: center; gap: 8px; padding: 5px 7px; border-radius: 8px;
+        cursor: pointer; border: 1px solid transparent; }
+    .g-item:hover { background: rgba(31,111,235,.06); }
+    .g-item.checked { background: rgba(31,111,235,.10); border-color: rgba(31,111,235,.35); }
+    .g-item.disabled { opacity: .42; cursor: not-allowed; }
+    .g-item img { width: 24px; height: 24px; border-radius: 7px; object-fit: cover;
+        border: 1px solid var(--border); flex-shrink: 0; background: #e8eef6; }
+    .g-item .gname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+        white-space: nowrap; font-weight: 600; font-size: 12px; }
+    .g-item .role { font-size: 10px; font-weight: 700; border-radius: 999px; padding: 1px 7px; flex-shrink: 0; }
+    .g-item .role.src { background: #eff6ff; color: var(--accent); border: 1px solid #93c5fd; }
+    .g-item .role.dst { background: #ecfdf5; color: var(--ok); border: 1px solid #6ee7b7; }
+    .mark { width: 15px; height: 15px; border: 2px solid #b6c4d6; background: #fff; flex-shrink: 0;
+        display: inline-flex; align-items: center; justify-content: center; font-size: 10px; color: #fff; }
+    .mark.box { border-radius: 4px; }
+    .mark.dot-r { border-radius: 50%; }
+    .g-item.checked .mark { background: var(--accent); border-color: var(--accent); }
+    .g-item.checked .mark.dot-r { background: var(--ok); border-color: var(--ok); }
+    .empty { color: var(--muted); text-align: center; padding: 22px 10px; font-size: 12px; }
+
+    /* ── Hoạt động: chip thống kê + bảng log ── */
+    .log-card { margin-top: 14px; }
+    .log-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .log-head .msg { flex: 1; min-width: 0; font-size: 11.5px; color: var(--muted);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+    .stat-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border);
+        border-radius: 999px; height: 26px; padding: 0 11px; font-size: 11.5px; font-weight: 700;
+        color: var(--muted); background: #fbfdff; }
+    .stat-chip b { font-size: 12.5px; }
+    .stat-chip .ok { color: var(--ok); } .stat-chip .er { color: var(--err); }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+        position: sticky; top: 0; background: var(--card); z-index: 1; }
+    .log-scroll { max-height: 380px; overflow-y: auto; border: 1px solid var(--border); border-radius: 11px; }
+    .tag { display: inline-block; border-radius: 999px; padding: 1px 8px; font-size: 10.5px; font-weight: 700; }
+    .tag.sent { background: #ecfdf5; color: var(--ok); border: 1px solid #6ee7b7; }
+    .tag.sent_partial { background: #fffbeb; color: var(--warn); border: 1px solid #fcd34d; }
+    .tag.error { background: #fef2f2; color: var(--err); border: 1px solid #fca5a5; }
+    td a { color: var(--accent); word-break: break-all; }
+</style>
+</head>
+<body>
+<div class="wrap">
+    <div class="bar">
+        <span class="brand">Aff Forwarder<span class="beta">Webhook</span></span>
+        <span class="chip" id="nexusPill" title="Địa chỉ Nexus API cố định trong webhook">
+            <span class="dot" id="nexusDot"></span><span id="nexusPillText">Đang kiểm tra Nexus...</span>
+        </span>
+        <span class="chip mode-off" id="modeChip"
+              title="Khi bật: tự kiểm tra theo chu kỳ. Lượt kiểm tra ĐẦU TIÊN của mỗi nhóm chỉ ghi mốc tin mới nhất (không chuyển tiếp tin cũ); từ lượt sau, tin mới có link Shopee/Lazada được thay bằng link aff của bạn rồi gửi kèm ảnh gốc vào nhóm kết quả.">⏸ Đang tắt</span>
+        <div class="spacer"></div>
+        <button class="btn icon" id="btnReloadNexus" title="Tải lại tài khoản + nhóm từ Nexus">⟳</button>
+        <label class="switch" title="Bật/tắt theo dõi tự động">
+            <input type="checkbox" id="enabledToggle">
+            <span class="track"></span>
+            <span class="st" id="enabledText">Đang tắt</span>
+        </label>
+        <button class="btn primary" id="btnRun">Chạy ngay</button>
+    </div>
+
+    <div class="statusbar" id="statusBar"></div>
+
+    <div class="layout">
+        <section class="card settings-card">
+            <h2>Cài đặt</h2>
+            <label class="fl">Tài khoản Zalo</label>
+            <select id="accountSelect"><option value="">— Chưa tải được tài khoản —</option></select>
+
+            <div class="row2">
+                <div>
+                    <label class="fl">Chu kỳ kiểm tra</label>
+                    <select id="intervalSelect">
+                        <option value="1">1 phút</option>
+                        <option value="2">2 phút</option>
+                        <option value="3">3 phút</option>
+                        <option value="5">5 phút</option>
+                        <option value="10">10 phút</option>
+                        <option value="15">15 phút</option>
+                        <option value="30">30 phút</option>
+                        <option value="60">60 phút</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="fl">Shopee aff ID</label>
+                    <input type="text" id="shopeeAffId" placeholder="17340820046">
+                </div>
+            </div>
+
+            <div class="row2">
+                <div>
+                    <label class="fl">SubID cố định (đối soát)</label>
+                    <input type="text" id="subId" placeholder="nexus">
+                </div>
+                <div>
+                    <label class="fl">Lazada User Token</label>
+                    <input type="text" id="lazadaUserToken" placeholder="User Token">
+                </div>
+            </div>
+            <p class="small" style="margin:2px 0 8px;color:#64748b">SubID gắn vào link Shopee (<code>&amp;sub_id=</code>) và Lazada (<code>subId1=</code>) để biết click/đơn nào qua hệ thống.</p>
+
+            <label class="fl">Lazada Open API (LiteApp)</label>
+            <div class="row2">
+                <div>
+                    <input type="text" id="lazadaAppKey" placeholder="App Key (VD: 105827)">
+                </div>
+                <div>
+                    <input type="text" id="lazadaAppSecret" placeholder="App Secret">
+                </div>
+            </div>
+            <p class="small" style="margin:2px 0 8px;color:#64748b">Ưu tiên dùng Open API để lấy link Lazada (ổn định, không hết hạn). Cookie bên dưới chỉ dùng dự phòng khi API lỗi.</p>
+
+            <label class="fl">Cookie Lazada <span style="font-weight:400;color:#94a3b8">(dự phòng)</span></label>
+            <div class="cookie-line">
+                <span class="ck-state" id="cookieState">Chưa có cookie</span>
+                <button class="btn mini" id="btnCookieEdit">Dán cookie</button>
+            </div>
+            <textarea id="lazadaCookie" rows="4" hidden
+                placeholder="Dán chuỗi Cookie header HOẶC copy nguyên bảng cookies từ DevTools (Application → Cookies của adsense.lazada.vn)..."
+                spellcheck="false"></textarea>
+
+            <label class="fl">Thử chuyển link</label>
+            <div class="inline">
+                <input type="text" id="testUrl" placeholder="Dán link Shopee / Lazada...">
+                <button class="btn" id="btnTest">Thử</button>
+            </div>
+            <div class="small mono" id="testResult" style="margin-top:5px"></div>
+
+            <div class="save-row">
+                <button class="btn primary" id="btnSave">Lưu cấu hình</button>
+            </div>
+            <div class="small" id="saveHint" style="margin-top:6px;text-align:center"></div>
+        </section>
+
+        <section class="card">
+            <div class="routes-head">
+                <h2>Luồng chuyển tiếp</h2>
+                <span class="hint">Chọn <strong>nhóm kết quả</strong> trước, rồi tick các <strong>nhóm nguồn</strong> — mỗi kết quả nhận từ nhiều nguồn.</span>
+            </div>
+            <div class="flow-row" id="flowRow">
+                <button type="button" class="flow-add" id="btnAddRoute">＋ Thêm luồng</button>
+            </div>
+            <div class="route-editor" id="routeEditor">
+                <div class="editor-empty">Bấm "＋ Thêm luồng" để bắt đầu.</div>
+            </div>
+        </section>
+    </div>
+
+    <section class="card log-card">
+        <div class="log-head">
+            <h2>Hoạt động</h2>
+            <span class="stat-chip">Đã gửi <b class="ok" id="statForwarded">0</b></span>
+            <span class="stat-chip">Lỗi <b class="er" id="statErrors">0</b></span>
+            <span class="stat-chip">Lần chạy <b id="statLastRun">—</b></span>
+            <span class="msg" id="statLastMsg">Chưa chạy lần nào</span>
+        </div>
+        <div class="log-scroll">
+            <table>
+                <thead><tr>
+                    <th style="width:125px">Thời gian</th>
+                    <th style="width:170px">Nguồn → Kết quả</th>
+                    <th>Nội dung / Link</th>
+                    <th style="width:88px">Trạng thái</th>
+                </tr></thead>
+                <tbody id="logBody">
+                    <tr><td colspan="4" class="small" style="text-align:center;padding:20px">Chưa có nhật ký.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+
+<script>
+const S = {
+    settings: {}, stats: {}, accounts: [], groups: [],
+    routes: [],      // [{id, dest, sources:Set}]
+    activeRoute: -1, // index luồng đang sửa
+    qDest: '', qSrc: '',
+};
+const qs = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+
+function showStatus(text, type = 'info') {
+    const el = qs('statusBar');
+    el.className = 'statusbar ' + type;
+    el.textContent = text;
+    clearTimeout(showStatus._t);
+    showStatus._t = setTimeout(() => { el.className = 'statusbar'; }, 6000);
+}
+
+async function api(url, options = {}) {
+    const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...options });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) throw new Error(data.error || data.message || ('HTTP ' + res.status));
+    return data;
+}
+
+// ─── Cấu hình ────────────────────────────────────────────────────────────────
+
+function fillForm() {
+    const st = S.settings;
+    qs('intervalSelect').value = String(st.interval_minutes || 1);
+    qs('shopeeAffId').value = st.shopee_aff_id || '';
+    qs('subId').value = st.sub_id || '';
+    qs('lazadaAppKey').value = st.lazada_app_key || '';
+    qs('lazadaAppSecret').value = st.lazada_app_secret || '';
+    qs('lazadaUserToken').value = st.lazada_user_token || '';
+    qs('lazadaCookie').value = st.lazada_cookie || '';
+    qs('enabledToggle').checked = !!st.enabled;
+    S.routes = (st.routes || []).map(r => ({
+        id: r.id || ('r' + Date.now()),
+        dest: r.dest_group_id || '',
+        sources: new Set(r.source_group_ids || []),
+    }));
+    if (S.activeRoute >= S.routes.length) S.activeRoute = S.routes.length - 1;
+    if (S.activeRoute < 0 && S.routes.length) S.activeRoute = 0;
+    updateModeUI();
+    updateCookieState();
+}
+
+function updateModeUI() {
+    const on = qs('enabledToggle').checked;
+    qs('enabledText').textContent = on ? 'Đang bật' : 'Đang tắt';
+    const chip = qs('modeChip');
+    chip.className = 'chip ' + (on ? 'mode-on' : 'mode-off');
+    chip.textContent = on ? '▶ Đang theo dõi' : '⏸ Đang tắt';
+}
+
+function updateCookieState() {
+    const cookie = qs('lazadaCookie').value.trim();
+    const state = qs('cookieState');
+    const n = cookie ? cookie.split(';').length : 0;
+    state.textContent = cookie ? `✓ Đã lưu (${n} cookie)` : 'Chưa có cookie — Lazada sẽ không chuyển được link';
+    state.className = 'ck-state' + (cookie ? ' ok' : '');
+    qs('btnCookieEdit').textContent = cookie ? 'Sửa' : 'Dán cookie';
+}
+
+function collectForm() {
+    return {
+        account_id: qs('accountSelect').value,
+        interval_minutes: Number(qs('intervalSelect').value || 1),
+        shopee_aff_id: qs('shopeeAffId').value.trim(),
+        sub_id: qs('subId').value.trim(),
+        lazada_app_key: qs('lazadaAppKey').value.trim(),
+        lazada_app_secret: qs('lazadaAppSecret').value.trim(),
+        lazada_user_token: qs('lazadaUserToken').value.trim(),
+        lazada_cookie: qs('lazadaCookie').value.trim(),
+        routes: S.routes.map(r => ({
+            id: r.id,
+            dest_group_id: r.dest,
+            source_group_ids: [...r.sources],
+        })),
+    };
+}
+
+async function loadConfig() {
+    const data = await api('/api/config');
+    S.settings = data.settings || {};
+    S.stats = data.stats || {};
+    S.nexusUrl = data.nexusUrl || '';
+    fillForm();
+    renderStats();
+}
+
+async function saveConfig(extra = {}) {
+    const payload = { ...collectForm(), ...extra };
+    const data = await api('/api/config', { method: 'PATCH', body: JSON.stringify(payload) });
+    S.settings = data.settings || {};
+    // Cookie sau chuẩn hóa (bảng DevTools → chuỗi header) hiển thị lại cho gọn.
+    qs('lazadaCookie').value = S.settings.lazada_cookie || '';
+    updateCookieState();
+    return data;
+}
+
+// ─── Tài khoản + nhóm từ Nexus ───────────────────────────────────────────────
+
+async function loadAccounts() {
+    const dot = qs('nexusDot'), pillText = qs('nexusPillText');
+    try {
+        const data = await api('/api/nexus/accounts');
+        S.accounts = data.accounts || [];
+        dot.className = 'dot ok';
+        pillText.textContent = 'Nexus — ' + S.accounts.length + ' tài khoản';
+        const sel = qs('accountSelect');
+        sel.innerHTML = S.accounts.length
+            ? S.accounts.map(a => `<option value="${esc(a.accountId)}">${esc(a.name || a.accountId)}</option>`).join('')
+            : '<option value="">— Nexus chưa có tài khoản —</option>';
+        if (S.settings.account_id && S.accounts.some(a => a.accountId === S.settings.account_id)) {
+            sel.value = S.settings.account_id;
+        }
+        await loadGroups();
+    } catch (err) {
+        dot.className = 'dot err';
+        pillText.textContent = 'Nexus: mất kết nối — mở Nexus.exe rồi bấm ⟳';
+        showStatus(err.message, 'err');
+    }
+}
+
+async function loadGroups() {
+    const accountId = qs('accountSelect').value;
+    if (!accountId) { S.groups = []; renderRoutes(); return; }
+    try {
+        const data = await api('/api/nexus/groups?accountId=' + encodeURIComponent(accountId));
+        S.groups = data.groups || [];
+    } catch (err) {
+        S.groups = [];
+        showStatus('Không tải được danh sách nhóm: ' + err.message, 'err');
+    }
+    const validIds = new Set(S.groups.map(g => g.groupId));
+    S.routes.forEach(r => {
+        if (r.dest && !validIds.has(r.dest)) r.dest = '';
+        r.sources = new Set([...r.sources].filter(id => validIds.has(id)));
+    });
+    renderRoutes();
+}
+
+function findGroup(gid) { return S.groups.find(x => x.groupId === gid); }
+
+function groupRow(g, opts) {
+    const { checked, disabled, mark, role } = opts;
+    return `
+        <div class="g-item ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}"
+             data-gid="${esc(g.groupId)}" title="${esc(g.name)}">
+            <span class="mark ${mark}">${checked ? '✓' : ''}</span>
+            <img src="${esc(g.avatar || '')}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">
+            <span class="gname">${esc(g.name)}</span>
+            ${role ? `<span class="role ${role.cls}">${role.text}</span>` : ''}
+        </div>`;
+}
+
+// ─── Thẻ flow: [avatar các nhóm nguồn] → [nhóm kết quả] ─────────────────────
+
+function renderRoutes() {
+    const row = qs('flowRow');
+    row.querySelectorAll('.flow-card').forEach(el => el.remove());
+    if (S.activeRoute >= S.routes.length) S.activeRoute = S.routes.length - 1;
+    if (S.activeRoute < 0 && S.routes.length) S.activeRoute = 0;
+
+    const addBtn = qs('btnAddRoute');
+    S.routes.forEach((r, i) => {
+        const g = findGroup(r.dest);
+        const srcs = [...r.sources].slice(0, 3).map(gid => {
+            const sg = findGroup(gid);
+            return `<img src="${esc(sg?.avatar || '')}" alt="" title="${esc(sg?.name || gid)}" onerror="this.style.visibility='hidden'">`;
+        }).join('');
+        const more = r.sources.size > 3 ? `<span class="fc-more">+${r.sources.size - 3}</span>` : '';
+        const srcHtml = r.sources.size
+            ? `<span class="fc-srcs" title="${r.sources.size} nhóm nguồn">${srcs}${more}</span>`
+            : '<span class="fc-none" title="Chưa chọn nhóm nguồn">?</span>';
+        const destHtml = g
+            ? `<span class="fc-dest"><img src="${esc(g.avatar || '')}" alt="" onerror="this.style.visibility='hidden'"><span class="fc-name">${esc(g.name)}</span></span>`
+            : '<span class="fc-dest"><span class="fc-name unset">Chưa chọn kết quả</span></span>';
+        const card = document.createElement('div');
+        card.className = 'flow-card' + (i === S.activeRoute ? ' active' : '');
+        card.dataset.idx = i;
+        card.title = (g ? g.name : 'Chưa chọn nhóm kết quả') + ' ← ' + r.sources.size + ' nhóm nguồn';
+        card.innerHTML = `${srcHtml}<span class="fc-arrow">➜</span>${destHtml}<button type="button" class="fc-del" title="Xóa luồng">✕</button>`;
+        card.addEventListener('click', (e) => {
+            if (e.target.closest('.fc-del')) {
+                S.routes.splice(i, 1);
+                if (S.activeRoute >= S.routes.length) S.activeRoute = S.routes.length - 1;
+                renderRoutes();
+                showStatus('Đã xóa luồng — bấm "Lưu cấu hình" để áp dụng.', 'info');
+                return;
+            }
+            S.activeRoute = i;
+            S.qDest = ''; S.qSrc = '';
+            renderRoutes();
+        });
+        row.insertBefore(card, addBtn);
+    });
+    renderEditor();
+}
+
+function renderEditor() {
+    const editor = qs('routeEditor');
+    const route = S.routes[S.activeRoute];
+    if (!route) {
+        editor.innerHTML = '<div class="editor-empty">Bấm "＋ Thêm luồng" để bắt đầu.<br>Mỗi luồng gồm 1 nhóm kết quả nhận tin từ nhiều nhóm nguồn.</div>';
+        return;
+    }
+    if (!S.groups.length) {
+        editor.innerHTML = '<div class="editor-empty">Chọn tài khoản có nhóm đã đồng bộ trong Nexus (mục "Nhóm Zalo") để cấu hình luồng.</div>';
+        return;
+    }
+    editor.innerHTML = `
+        <div class="group-panel">
+            <div class="gp-head">
+                <span class="step-no">1</span><span class="t">Nhóm kết quả</span>
+                <span class="c" id="edDestLabel"></span>
+            </div>
+            <div class="gp-search"><input type="text" id="edDestSearch" placeholder="Tìm nhóm..." value="${esc(S.qDest)}"></div>
+            <div class="gp-list" id="edDestList"></div>
+        </div>
+        <div class="group-panel">
+            <div class="gp-head">
+                <span class="step-no">2</span><span class="t">Nhóm nguồn</span>
+                <span class="c" id="edSrcLabel"></span>
+                <button class="btn mini" id="edSrcAll">Tất cả</button>
+                <button class="btn mini" id="edSrcNone">Bỏ chọn</button>
+            </div>
+            <div class="gp-search"><input type="text" id="edSrcSearch" placeholder="Tìm nhóm..." value="${esc(S.qSrc)}"></div>
+            <div class="gp-list" id="edSrcList"></div>
+        </div>`;
+    qs('edDestSearch').addEventListener('input', (e) => { S.qDest = e.target.value; renderDestList(); });
+    qs('edSrcSearch').addEventListener('input', (e) => { S.qSrc = e.target.value; renderSrcList(); });
+    qs('edSrcAll').addEventListener('click', () => {
+        S.groups.forEach(g => { if (g.groupId !== route.dest) route.sources.add(g.groupId); });
+        renderSrcList(); refreshFlowCard();
+    });
+    qs('edSrcNone').addEventListener('click', () => { route.sources.clear(); renderSrcList(); refreshFlowCard(); });
+    renderDestList();
+    renderSrcList();
+}
+
+// Vẽ lại riêng thẻ flow đang sửa (giữ nguyên editor + focus ô tìm kiếm).
+function refreshFlowCard() {
+    const cards = qs('flowRow').querySelectorAll('.flow-card');
+    const route = S.routes[S.activeRoute];
+    const card = cards[S.activeRoute];
+    if (!route || !card) return;
+    const g = findGroup(route.dest);
+    const srcs = [...route.sources].slice(0, 3).map(gid => {
+        const sg = findGroup(gid);
+        return `<img src="${esc(sg?.avatar || '')}" alt="" title="${esc(sg?.name || gid)}" onerror="this.style.visibility='hidden'">`;
+    }).join('');
+    const more = route.sources.size > 3 ? `<span class="fc-more">+${route.sources.size - 3}</span>` : '';
+    const srcHtml = route.sources.size
+        ? `<span class="fc-srcs" title="${route.sources.size} nhóm nguồn">${srcs}${more}</span>`
+        : '<span class="fc-none" title="Chưa chọn nhóm nguồn">?</span>';
+    const destHtml = g
+        ? `<span class="fc-dest"><img src="${esc(g.avatar || '')}" alt="" onerror="this.style.visibility='hidden'"><span class="fc-name">${esc(g.name)}</span></span>`
+        : '<span class="fc-dest"><span class="fc-name unset">Chưa chọn kết quả</span></span>';
+    card.innerHTML = `${srcHtml}<span class="fc-arrow">➜</span>${destHtml}<button type="button" class="fc-del" title="Xóa luồng">✕</button>`;
+}
+
+function renderDestList() {
+    const route = S.routes[S.activeRoute];
+    const wrap = qs('edDestList');
+    if (!route || !wrap) return;
+    const q = S.qDest.trim().toLowerCase();
+    const list = S.groups.filter(g => !q || g.name.toLowerCase().includes(q));
+    wrap.innerHTML = list.length ? list.map(g => groupRow(g, {
+        checked: g.groupId === route.dest,
+        disabled: route.sources.has(g.groupId),
+        mark: 'dot-r',
+        role: route.sources.has(g.groupId) ? { cls: 'src', text: 'Nguồn' } : null,
+    })).join('') : '<div class="empty">Không có nhóm khớp từ khóa.</div>';
+    const label = qs('edDestLabel');
+    const g = findGroup(route.dest);
+    if (label) label.textContent = g ? g.name : 'chưa chọn';
+    wrap.querySelectorAll('.g-item').forEach(el => el.addEventListener('click', () => {
+        const gid = el.dataset.gid;
+        if (route.sources.has(gid)) { showStatus('Nhóm này đang là nhóm nguồn của luồng — bỏ tick bên phải trước.', 'err'); return; }
+        route.dest = (route.dest === gid) ? '' : gid;
+        renderDestList(); renderSrcList(); refreshFlowCard();
+    }));
+}
+
+function renderSrcList() {
+    const route = S.routes[S.activeRoute];
+    const wrap = qs('edSrcList');
+    if (!route || !wrap) return;
+    const q = S.qSrc.trim().toLowerCase();
+    const list = S.groups.filter(g => !q || g.name.toLowerCase().includes(q));
+    wrap.innerHTML = list.length ? list.map(g => groupRow(g, {
+        checked: route.sources.has(g.groupId),
+        disabled: g.groupId === route.dest,
+        mark: 'box',
+        role: g.groupId === route.dest ? { cls: 'dst', text: 'Kết quả' } : null,
+    })).join('') : '<div class="empty">Không có nhóm khớp từ khóa.</div>';
+    const label = qs('edSrcLabel');
+    if (label) label.textContent = route.sources.size + ' nhóm được chọn';
+    wrap.querySelectorAll('.g-item').forEach(el => el.addEventListener('click', () => {
+        const gid = el.dataset.gid;
+        if (gid === route.dest) { showStatus('Nhóm này đang là nhóm kết quả của luồng — chọn nhóm khác làm kết quả trước.', 'err'); return; }
+        if (route.sources.has(gid)) route.sources.delete(gid); else route.sources.add(gid);
+        renderSrcList(); refreshFlowCard();
+    }));
+}
+
+// ─── Thống kê + nhật ký ──────────────────────────────────────────────────────
+
+function renderStats() {
+    qs('statForwarded').textContent = S.stats.forwarded ?? 0;
+    qs('statErrors').textContent = S.stats.errors ?? 0;
+    qs('statLastRun').textContent = (S.stats.lastRunAt || '—').slice(11) || '—';
+    qs('statLastRun').title = S.stats.lastRunAt || '';
+    qs('statLastMsg').textContent = S.stats.lastRunMessage || '';
+    qs('statLastMsg').title = S.stats.lastRunMessage || '';
+}
+
+function groupName(gid) {
+    const g = S.groups.find(x => x.groupId === gid);
+    return g ? g.name : gid;
+}
+
+async function loadLogs() {
+    try {
+        const data = await api('/api/logs');
+        S.stats = data.stats || {};
+        renderStats();
+        const logs = data.logs || [];
+        const body = qs('logBody');
+        if (!logs.length) {
+            body.innerHTML = '<tr><td colspan="4" class="small" style="text-align:center;padding:20px">Chưa có nhật ký.</td></tr>';
+            return;
+        }
+        body.innerHTML = logs.map(l => {
+            const links = (l.links || []).map(x => x.ok
+                ? `<div>✅ <a href="${esc(x.aff)}" target="_blank" rel="noopener">${esc(x.aff)}</a></div>`
+                : `<div>❌ <span class="mono">${esc(x.original)}</span> — ${esc(x.error)}</div>`
+            ).join('');
+            const statusLabel = { sent: 'Đã gửi', sent_partial: 'Gửi 1 phần', error: 'Lỗi' }[l.status] || l.status;
+            return `<tr>
+                <td class="small">${esc(l.at || '')}</td>
+                <td><strong>${esc(groupName(l.groupId) || l.groupName || '')}</strong>
+                    ${l.destGroupId ? `<div class="small">➜ ${esc(groupName(l.destGroupId))}</div>` : ''}
+                    ${l.sender ? `<div class="small">${esc(l.sender)}</div>` : ''}</td>
+                <td>${l.textPreview ? `<div>${esc(l.textPreview)}</div>` : ''}${links}
+                    ${l.error && !(l.links || []).length ? `<div class="small">${esc(l.error)}</div>` : ''}
+                    ${l.withPhoto ? '<div class="small">📷 kèm ảnh</div>' : ''}</td>
+                <td><span class="tag ${esc(l.status)}">${esc(statusLabel)}</span>
+                    ${l.status === 'error' && (l.links || []).length ? `<div class="small">${esc(l.error || '')}</div>` : ''}</td>
+            </tr>`;
+        }).join('');
+    } catch (err) { /* giữ log cũ khi lỗi tạm thời */ }
+}
+
+// ─── Hành động ───────────────────────────────────────────────────────────────
+
+async function toggleEnabled() {
+    const toggle = qs('enabledToggle');
+    const wantOn = toggle.checked;
+    toggle.disabled = true;
+    try {
+        await saveConfig({ enabled: wantOn });
+        updateModeUI();
+        showStatus(wantOn
+            ? 'Đã bật — lượt đầu chỉ ghi mốc từng nhóm, từ lượt sau mới chuyển tiếp tin phát sinh.'
+            : 'Đã tắt — ngừng kiểm tra tự động.', wantOn ? 'ok' : 'info');
+        if (wantOn) { await runNow(true); }
+    } catch (err) {
+        toggle.checked = !wantOn;
+        updateModeUI();
+        showStatus('Không đổi được trạng thái: ' + err.message, 'err');
+    } finally { toggle.disabled = false; }
+}
+
+async function runNow(silent) {
+    const btn = qs('btnRun');
+    btn.disabled = true; btn.textContent = 'Đang chạy...';
+    try {
+        const data = await api('/api/run', { method: 'POST' });
+        if (!silent) showStatus(data.message || 'Đã chạy xong.', data.success ? 'ok' : 'err');
+        await loadLogs();
+    } catch (err) {
+        showStatus('Chạy lỗi: ' + err.message, 'err');
+    } finally { btn.disabled = false; btn.textContent = 'Chạy ngay'; }
+}
+
+async function testConvert() {
+    const url = qs('testUrl').value.trim();
+    const out = qs('testResult');
+    if (!url) { out.textContent = 'Nhập link sản phẩm trước.'; return; }
+    out.textContent = 'Đang chuyển...';
+    try {
+        // Lưu aff id / cookie đang gõ trước khi thử để test đúng cấu hình trên form.
+        await saveConfig();
+        const res = await fetch('/api/test-convert', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url }),
+        });
+        const data = await res.json().catch(() => ({}));
+        out.innerHTML = data.success
+            ? `✅ <a href="${esc(data.link)}" target="_blank" rel="noopener">${esc(data.link)}</a>`
+            : '❌ ' + esc(data.message || data.error || 'Chuyển link thất bại.');
+    } catch (err) { out.textContent = '❌ ' + err.message; }
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadConfig();
+    await loadAccounts();
+    await loadLogs();
+
+    qs('btnSave').addEventListener('click', async () => {
+        try {
+            await saveConfig();
+            qs('saveHint').textContent = 'Đã lưu lúc ' + new Date().toLocaleTimeString('vi-VN');
+            const incomplete = S.routes.filter(r => !r.dest || !r.sources.size).length;
+            showStatus('Đã lưu cấu hình.' + (incomplete
+                ? ` Lưu ý: ${incomplete} luồng chưa đủ (thiếu nhóm kết quả hoặc nhóm nguồn) sẽ bị bỏ qua khi chạy.`
+                : ''), incomplete ? 'info' : 'ok');
+        } catch (err) { showStatus('Không lưu được: ' + err.message, 'err'); }
+    });
+    qs('btnRun').addEventListener('click', () => runNow(false));
+    qs('btnTest').addEventListener('click', testConvert);
+    qs('enabledToggle').addEventListener('change', toggleEnabled);
+    qs('accountSelect').addEventListener('change', loadGroups);
+    qs('btnReloadNexus').addEventListener('click', loadAccounts);
+    qs('btnAddRoute').addEventListener('click', () => {
+        S.routes.push({ id: 'r' + Date.now(), dest: '', sources: new Set() });
+        S.activeRoute = S.routes.length - 1;
+        S.qDest = ''; S.qSrc = '';
+        renderRoutes();
+    });
+    qs('btnCookieEdit').addEventListener('click', () => {
+        const ta = qs('lazadaCookie');
+        ta.hidden = !ta.hidden;
+        if (!ta.hidden) ta.focus();
+    });
+    qs('lazadaCookie').addEventListener('input', updateCookieState);
+
+    setInterval(() => { if (!document.hidden) loadLogs(); }, 10000);
+});
+</script>
+</body>
+</html>
