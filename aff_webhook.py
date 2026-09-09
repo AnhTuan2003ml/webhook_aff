@@ -49,6 +49,9 @@ NEXUS_URL = os.environ.get("NEXUS_URL", "http://127.0.0.1:5000").rstrip("/")
 _lock = threading.RLock()
 
 _MAX_LOGS = 200
+# Nhóm mới thêm: vẫn chuyển tiếp tin đăng trong khoảng này (mặc định 30 phút);
+# tin cũ hơn coi là lịch sử -> chỉ ghi mốc, không chuyển.
+_BASELINE_RECENT_MS = 30 * 60 * 1000
 DEFAULT_SHOPEE_AFF_ID = "17340820046"
 # subId CỐ ĐỊNH gắn vào link Shopee (&sub_id=) và Lazada (subId1=) để biết
 # click/đơn nào đến qua hệ thống này khi đối soát ở webhook affiliate.
@@ -336,14 +339,20 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
         # Cập nhật MỐC = tin mới nhất hiện có (lần sau lấy tin gửi sau tin này).
         last_by_group[gid] = {"msgId": str(newest.get("msgId") or ""),
                               "ts": int(newest.get("createTime") or 0)}
-        if is_baseline:
-            baseline_count += 1
-            continue  # lần đầu: chỉ ghi mốc, không chuyển tiếp tin cũ
 
-        # Tin gửi SAU mốc trước, xử lý theo thứ tự CŨ -> MỚI.
-        new_items = [it for it in items
-                     if int(it.get("createTime") or 0) > prev_ts and str(it.get("msgId") or "") != prev_id]
-        new_items.sort(key=lambda x: int(x.get("createTime") or 0))
+        if is_baseline:
+            # Nhóm MỚI thêm: vẫn chuyển tiếp tin RẤT MỚI (trong _BASELINE_RECENT_MS)
+            # để không bỏ lỡ tin vừa đăng; chỉ bỏ qua lịch sử cũ.
+            recent_cutoff = int(time.time() * 1000) - _BASELINE_RECENT_MS
+            new_items = [it for it in items if int(it.get("createTime") or 0) >= recent_cutoff]
+            if not new_items:
+                baseline_count += 1
+                continue  # chỉ có tin cũ -> ghi mốc, không chuyển
+        else:
+            # Tin gửi SAU mốc trước.
+            new_items = [it for it in items
+                         if int(it.get("createTime") or 0) > prev_ts and str(it.get("msgId") or "") != prev_id]
+        new_items.sort(key=lambda x: int(x.get("createTime") or 0))  # CŨ -> MỚI
         if not new_items:
             continue
 
