@@ -380,7 +380,7 @@ function updateCookieState() {
 
 function collectForm() {
     return {
-        account_id: qs('accountSelect').value,
+        profile_id: qs('accountSelect').value,
         interval_minutes: Number(qs('intervalSelect').value || 1),
         shopee_aff_id: qs('shopeeAffId').value.trim(),
         sub_id: qs('subId').value.trim(),
@@ -425,11 +425,20 @@ async function loadAccounts() {
         dot.className = 'dot ok';
         pillText.textContent = 'Nexus — ' + S.accounts.length + ' tài khoản';
         const sel = qs('accountSelect');
+        // Giá trị chọn = profileId (uid Zalo, ổn định). Tài khoản chưa đăng nhập
+        // (chưa có profileId) được đánh dấu để tránh chọn nhầm.
         sel.innerHTML = S.accounts.length
-            ? S.accounts.map(a => `<option value="${esc(a.accountId)}">${esc(a.name || a.accountId)}</option>`).join('')
+            ? S.accounts.map(a => {
+                const pid = a.profileId || '';
+                const label = esc(a.name || pid || a.accountId) + (pid ? '' : ' (chưa đăng nhập)');
+                return `<option value="${esc(pid || a.accountId)}"${pid ? '' : ' disabled'}>${label}</option>`;
+              }).join('')
             : '<option value="">— Nexus chưa có tài khoản —</option>';
-        if (S.settings.account_id && S.accounts.some(a => a.accountId === S.settings.account_id)) {
-            sel.value = S.settings.account_id;
+        // Khôi phục lựa chọn: khớp theo profile_id (mới) HOẶC account_id (cấu hình cũ).
+        const savedRef = S.settings.profile_id || S.settings.account_id || '';
+        if (savedRef) {
+            const acc = S.accounts.find(a => a.profileId === savedRef || a.accountId === savedRef);
+            if (acc) sel.value = acc.profileId || acc.accountId;
         }
         await loadGroups();
     } catch (err) {
@@ -440,10 +449,10 @@ async function loadAccounts() {
 }
 
 async function loadGroups() {
-    const accountId = qs('accountSelect').value;
-    if (!accountId) { S.groups = []; renderRoutes(); return; }
+    const profileId = qs('accountSelect').value;
+    if (!profileId) { S.groups = []; renderRoutes(); return; }
     try {
-        const data = await api('/api/nexus/groups?accountId=' + encodeURIComponent(accountId));
+        const data = await api('/api/nexus/groups?profileId=' + encodeURIComponent(profileId));
         S.groups = data.groups || [];
     } catch (err) {
         S.groups = [];

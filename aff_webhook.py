@@ -70,6 +70,10 @@ app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 def _default_settings() -> dict:
     return {
         "enabled": False,
+        # profileId (uid Zalo — ổn định) của tài khoản thực hiện; webhook chỉ
+        # truyền cái này, Nexus tự tra cookies/zpwEnk/imei. account_id giữ lại
+        # để tương thích cấu hình cũ.
+        "profile_id": "",
         "account_id": "",
         # Mỗi luồng: 1 NHÓM KẾT QUẢ nhận tin từ NHIỀU nhóm nguồn.
         # [{"id", "dest_group_id", "source_group_ids": [...]}]
@@ -225,7 +229,8 @@ def _download_image(url: str, timeout: int = 30) -> bytes:
 def _send_to_dest(settings: dict, dest_group_id: str, text: str, thumb: str) -> dict:
     """Gửi nội dung (kèm ảnh nếu tải được) vào nhóm kết quả qua API Nexus."""
     data = {
-        "accountId": settings["account_id"],
+        # Nexus tự tra cookies/zpwEnk/imei theo profileId.
+        "profileId": settings.get("profile_id") or settings.get("account_id") or "",
         "group_id": dest_group_id,
         "message": text,
     }
@@ -267,7 +272,9 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
         result.update(extra)
         return result
 
-    if not settings["account_id"]:
+    # profileId (uid) của tài khoản thực hiện — Nexus tự tra phiên theo id này.
+    acc_ref = str(settings.get("profile_id") or settings.get("account_id") or "").strip()
+    if not acc_ref:
         return _finish(False, "Chưa chọn tài khoản Zalo trên dashboard.")
     # Luồng đủ cấu hình = có nhóm kết quả + ít nhất 1 nhóm nguồn.
     routes = [r for r in settings["routes"] if r["dest_group_id"] and r["source_group_ids"]]
@@ -291,7 +298,7 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
     for gid in source_ids:
         try:
             payload = nexus_get("/api/messages/group-latest",
-                                {"groupId": gid, "account_id": settings["account_id"]})
+                                {"groupId": gid, "profileId": acc_ref})
         except NexusError as exc:
             return _finish(False, str(exc), checkedGroups=checked)
         checked += 1
@@ -462,6 +469,8 @@ def api_config():
         settings = db["settings"]
         if "enabled" in patch:
             settings["enabled"] = bool(patch["enabled"])
+        if "profile_id" in patch:
+            settings["profile_id"] = str(patch["profile_id"] or "").strip()
         if "account_id" in patch:
             settings["account_id"] = str(patch["account_id"] or "").strip()
         if "routes" in patch:
@@ -535,7 +544,10 @@ def api_nexus_accounts():
     except NexusError as exc:
         return jsonify({"success": False, "error": str(exc), "accounts": []}), 502
     accounts = [
-        {"accountId": str(a.get("accountId") or ""), "name": str(a.get("name") or ""),
+        {"accountId": str(a.get("accountId") or ""),
+         # profileId = uid Zalo (ổn định) — webhook chỉ cần truyền cái này.
+         "profileId": str(a.get("uid") or ""),
+         "name": str(a.get("name") or ""),
          "avatarUrl": str(a.get("avatarUrl") or "")}
         for a in (payload.get("accounts") or [])
     ]
@@ -545,11 +557,12 @@ def api_nexus_accounts():
 @app.route("/api/nexus/groups", methods=["GET"])
 def api_nexus_groups():
     """Proxy: danh sách nhóm của tài khoản từ Nexus."""
-    account_id = str(request.args.get("accountId") or "").strip()
-    if not account_id:
-        return jsonify({"success": False, "error": "Thiếu accountId", "groups": []}), 400
+    # Nhận profileId (uid) — ưu tiên; vẫn nhận accountId để tương thích.
+    profile_ref = str(request.args.get("profileId") or request.args.get("accountId") or "").strip()
+    if not profile_ref:
+        return jsonify({"success": False, "error": "Thiếu profileId", "groups": []}), 400
     try:
-        payload = nexus_get("/api/groups/personal", {"accountId": account_id})
+        payload = nexus_get("/api/groups/personal", {"profileId": profile_ref})
     except NexusError as exc:
         return jsonify({"success": False, "error": str(exc), "groups": []}), 502
     groups = [
