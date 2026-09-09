@@ -320,100 +320,115 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                 _save_db(d)
             continue
 
-        latest = payload.get("latest") or {}
-        if not latest:
+        # Lấy DANH SÁCH tin (mới -> cũ) rồi xử lý MỌI tin GỬI SAU tin đã lưu lần
+        # trước (không chỉ tin mới nhất) -> không bỏ sót khi có nhiều tin giữa 2 lần quét.
+        items = payload.get("items")
+        if not isinstance(items, list) or not items:
+            _lt = payload.get("latest") or {}
+            items = [_lt] if _lt else []
+        if not items:
             continue
         prev = last_by_group.get(gid) or {}
         is_baseline = not prev.get("msgId")
-        msg_id = str(latest.get("msgId") or "")
-        msg_ts = int(latest.get("createTime") or 0)
-        if msg_id and msg_ts >= int(prev.get("ts") or 0):
-            last_by_group[gid] = {"msgId": msg_id, "ts": msg_ts}
+        prev_ts = int(prev.get("ts") or 0)
+        prev_id = str(prev.get("msgId") or "")
+        newest = items[0]
+        # Cập nhật MỐC = tin mới nhất hiện có (lần sau lấy tin gửi sau tin này).
+        last_by_group[gid] = {"msgId": str(newest.get("msgId") or ""),
+                              "ts": int(newest.get("createTime") or 0)}
         if is_baseline:
             baseline_count += 1
             continue  # lần đầu: chỉ ghi mốc, không chuyển tiếp tin cũ
-        if not msg_id or msg_id == prev.get("msgId") or msg_ts <= int(prev.get("ts") or 0):
-            continue  # không có tin mới hơn mốc đã biết
 
-        new_messages += 1
-        if str(latest.get("senderUid") or "") in ("", "0"):
-            continue  # tin của chính tài khoản — bỏ qua để không tự chuyển tiếp
+        # Tin gửi SAU mốc trước, xử lý theo thứ tự CŨ -> MỚI.
+        new_items = [it for it in items
+                     if int(it.get("createTime") or 0) > prev_ts and str(it.get("msgId") or "") != prev_id]
+        new_items.sort(key=lambda x: int(x.get("createTime") or 0))
+        if not new_items:
+            continue
 
-        raw_text = _strip_content_label(latest.get("title"))
-        scan_text = " ".join(filter(None, [raw_text, str(latest.get("href") or "")]))
-        links = extract_product_links(scan_text)
-        if not links:
-            continue  # tin mới nhưng không có link Shopee/Lazada
+        for latest in new_items:
+            msg_id = str(latest.get("msgId") or "")
+            msg_ts = int(latest.get("createTime") or 0)
+            new_messages += 1
+            if str(latest.get("senderUid") or "") in ("", "0"):
+                continue  # tin của chính tài khoản — bỏ qua để không tự chuyển tiếp
 
-        conversions = []
-        new_text = raw_text
-        ok_count = 0
-        for item in links:
-            conv = convert_product_link(item["url"], item["platform"], settings)
-            conversions.append(conv)
-            if conv.get("ok"):
-                ok_count += 1
-                if item["url"] in new_text:
-                    new_text = new_text.replace(item["url"], conv["link"])
-                else:
-                    # Link nằm ở href (link card) — nối vào cuối nội dung.
-                    new_text = (new_text + "\n" + conv["link"]).strip()
+            raw_text = _strip_content_label(latest.get("title"))
+            scan_text = " ".join(filter(None, [raw_text, str(latest.get("href") or "")]))
+            links = extract_product_links(scan_text)
+            if not links:
+                continue  # tin không có link Shopee/Lazada
 
-        def _base_entry() -> dict:
-            return {
-                "groupId": gid,
-                "groupName": gid,
-                "sender": str(latest.get("senderName") or latest.get("senderUid") or ""),
-                "textPreview": (new_text or raw_text)[:220],
-                "links": [
-                    {"platform": c.get("platform"), "original": c.get("original"),
-                     "aff": c.get("link", ""), "ok": bool(c.get("ok")),
-                     "error": "" if c.get("ok") else str(c.get("message") or "")}
-                    for c in conversions
-                ],
-                "msgId": msg_id,
-                "msgTs": msg_ts,
-            }
+            conversions = []
+            new_text = raw_text
+            ok_count = 0
+            for item in links:
+                conv = convert_product_link(item["url"], item["platform"], settings)
+                conversions.append(conv)
+                if conv.get("ok"):
+                    ok_count += 1
+                    if item["url"] in new_text:
+                        new_text = new_text.replace(item["url"], conv["link"])
+                    else:
+                        # Link nằm ở href (link card) — nối vào cuối nội dung.
+                        new_text = (new_text + "\n" + conv["link"]).strip()
 
-        entries = []
-        if ok_count == 0:
-            errors += 1
-            entry = _base_entry()
-            entry.update({"status": "error",
-                          "error": "Không chuyển được link nào: "
-                                   + "; ".join(str(c.get("message") or "") for c in conversions)})
-            entries.append(entry)
-        else:
-            # Tin thuộc bao nhiêu luồng thì gửi vào bấy nhiêu nhóm kết quả.
-            for route in routes_by_source[gid]:
-                sent = _send_to_dest(settings, route["dest_group_id"], new_text,
-                                     str(latest.get("thumb") or ""))
+            def _base_entry() -> dict:
+                return {
+                    "groupId": gid,
+                    "groupName": gid,
+                    "sender": str(latest.get("senderName") or latest.get("senderUid") or ""),
+                    "textPreview": (new_text or raw_text)[:220],
+                    "links": [
+                        {"platform": c.get("platform"), "original": c.get("original"),
+                         "aff": c.get("link", ""), "ok": bool(c.get("ok")),
+                         "error": "" if c.get("ok") else str(c.get("message") or "")}
+                        for c in conversions
+                    ],
+                    "msgId": msg_id,
+                    "msgTs": msg_ts,
+                }
+
+            entries = []
+            if ok_count == 0:
+                errors += 1
                 entry = _base_entry()
-                entry["destGroupId"] = route["dest_group_id"]
-                if sent.get("ok"):
-                    forwarded += 1
-                    entry.update({
-                        "status": "sent" if ok_count == len(conversions) else "sent_partial",
-                        "withPhoto": bool(sent.get("withPhoto")),
-                        "error": "",
-                    })
-                else:
-                    errors += 1
-                    entry.update({"status": "error", "withPhoto": False,
-                                  "error": str(sent.get("message") or "Gửi vào nhóm kết quả thất bại")})
+                entry.update({"status": "error",
+                              "error": "Không chuyển được link nào: "
+                                       + "; ".join(str(c.get("message") or "") for c in conversions)})
                 entries.append(entry)
+            else:
+                # Tin thuộc bao nhiêu luồng thì gửi vào bấy nhiêu nhóm kết quả.
+                for route in routes_by_source[gid]:
+                    sent = _send_to_dest(settings, route["dest_group_id"], new_text,
+                                         str(latest.get("thumb") or ""))
+                    entry = _base_entry()
+                    entry["destGroupId"] = route["dest_group_id"]
+                    if sent.get("ok"):
+                        forwarded += 1
+                        entry.update({
+                            "status": "sent" if ok_count == len(conversions) else "sent_partial",
+                            "withPhoto": bool(sent.get("withPhoto")),
+                            "error": "",
+                        })
+                    else:
+                        errors += 1
+                        entry.update({"status": "error", "withPhoto": False,
+                                      "error": str(sent.get("message") or "Gửi vào nhóm kết quả thất bại")})
+                    entries.append(entry)
 
-        with _lock:
-            d = _load_db()
-            for entry in entries:
-                _append_log(d, entry)
-                if entry["status"].startswith("sent"):
-                    d["stats"]["forwarded"] = int(d["stats"]["forwarded"]) + 1
-                else:
-                    d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
-            _save_db(d)
+            with _lock:
+                d = _load_db()
+                for entry in entries:
+                    _append_log(d, entry)
+                    if entry["status"].startswith("sent"):
+                        d["stats"]["forwarded"] = int(d["stats"]["forwarded"]) + 1
+                    else:
+                        d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
+                _save_db(d)
 
-        time.sleep(0.3)  # giãn nhẹ giữa các nhóm cho API Zalo
+            time.sleep(0.3)  # giãn nhẹ giữa các tin cho API Zalo
 
     with _lock:
         d = _load_db()
