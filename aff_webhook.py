@@ -78,7 +78,8 @@ def _default_settings() -> dict:
         # Mỗi luồng: 1 NHÓM KẾT QUẢ nhận tin từ NHIỀU nhóm nguồn.
         # [{"id", "dest_group_id", "source_group_ids": [...]}]
         "routes": [],
-        "interval_minutes": 1,
+        # Chu kỳ kiểm tra tính bằng GIÂY (tối thiểu 1s).
+        "interval_seconds": 1,
         "shopee_aff_id": DEFAULT_SHOPEE_AFF_ID,
         # subId cố định (đối soát click/đơn qua hệ thống) — dùng cho cả Shopee & Lazada.
         "sub_id": DEFAULT_SUB_ID,
@@ -131,6 +132,12 @@ def _load_db() -> dict:
             "dest_group_id": settings.get("dest_group_id"),
             "source_group_ids": settings.get("source_group_ids") or [],
         }]
+    # Migration chu kỳ bản cũ (phút) → giây.
+    if "interval_seconds" not in settings and settings.get("interval_minutes"):
+        try:
+            settings["interval_seconds"] = max(1, int(settings["interval_minutes"]) * 60)
+        except Exception:
+            settings["interval_seconds"] = 1
     merged = _default_settings()
     merged.update({k: v for k, v in settings.items() if k in merged})
     merged["routes"] = _sanitize_routes(merged.get("routes"))
@@ -429,13 +436,16 @@ _run_lock = threading.Lock()  # tránh chạy chồng (worker + bấm tay cùng 
 def _worker_loop() -> None:
     global _last_run
     while True:
-        time.sleep(10)
+        # Ngủ ngắn để phục vụ được chu kỳ nhỏ (tới 1s). Mỗi vòng chỉ đọc cấu
+        # hình nhẹ rồi kiểm tra mốc thời gian; lượt quét Nexus vẫn do _run_lock
+        # chống chạy chồng.
+        time.sleep(1)
         try:
             with _lock:
                 settings = _load_db()["settings"]
             if not settings.get("enabled"):
                 continue
-            interval_seconds = max(1, int(settings.get("interval_minutes") or 1)) * 60
+            interval_seconds = max(1, int(settings.get("interval_seconds") or 1))
             if time.time() - _last_run < interval_seconds:
                 continue
             _last_run = time.time()
@@ -475,11 +485,11 @@ def api_config():
             settings["account_id"] = str(patch["account_id"] or "").strip()
         if "routes" in patch:
             settings["routes"] = _sanitize_routes(patch["routes"])
-        if "interval_minutes" in patch:
+        if "interval_seconds" in patch:
             try:
-                settings["interval_minutes"] = max(1, int(patch["interval_minutes"]))
+                settings["interval_seconds"] = max(1, int(patch["interval_seconds"]))
             except Exception:
-                settings["interval_minutes"] = 1
+                settings["interval_seconds"] = 1
         if "shopee_aff_id" in patch:
             settings["shopee_aff_id"] = str(patch["shopee_aff_id"] or "").strip() or DEFAULT_SHOPEE_AFF_ID
         if "sub_id" in patch:
