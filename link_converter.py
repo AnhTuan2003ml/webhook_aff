@@ -216,21 +216,52 @@ def classify_product_link(url: str) -> str:
     return ""
 
 
-def extract_product_links(text: str) -> list:
-    """Tách các link Shopee/Lazada trong nội dung tin nhắn (giữ thứ tự, khử trùng lặp).
+def extract_product_links(text: str, resolve_unknown: bool = False, timeout: int = 10) -> list:
+    """Tách link Shopee/Lazada trong nội dung tin nhắn (giữ thứ tự, khử trùng lặp).
 
-    Returns: [{"url": ..., "platform": "shopee"|"lazada"}]
+    Với ``resolve_unknown=True``: mọi link http KHÁC (link rút gọn của bên thứ
+    ba như dealgiare.com...) được đi theo redirect; nếu ĐÍCH là Shopee/Lazada
+    thì vẫn nhận (để chuyển sang mã aff của mình), kèm ``resolved`` = URL đích.
+
+    Returns: [{"url": <url gốc trong tin>, "platform": "shopee"|"lazada",
+               "resolved": <url đích để dựng link aff>}]
     """
     found = []
     seen = set()
     for raw in URL_RE.findall(str(text or "")):
         url = _clean_url(raw)
-        platform = classify_product_link(url)
-        if not platform or url in seen:
+        if url in seen:
             continue
         seen.add(url)
-        found.append({"url": url, "platform": platform})
+        platform = classify_product_link(url)
+        if platform:
+            found.append({"url": url, "platform": platform, "resolved": url})
+            continue
+        if resolve_unknown:
+            # Link lạ: đi theo redirect xem có dẫn tới Shopee/Lazada không.
+            dest = _resolve_any(url, timeout)
+            dplatform = classify_product_link(dest)
+            if dplatform:
+                found.append({"url": url, "platform": dplatform, "resolved": dest})
     return found
+
+
+def _resolve_any(url: str, timeout: int = 10) -> str:
+    """Đi theo mọi redirect của một link BẤT KỲ để lấy URL đích cuối cùng.
+
+    Dùng cho link rút gọn của bên thứ ba (không thuộc ``_SHORT_HOSTS``). Chỉ cần
+    URL cuối nên không tải body. Lỗi thì trả lại URL ban đầu."""
+    url = _clean_url(url)
+    try:
+        response = requests.get(
+            url, headers={"User-Agent": BROWSER_UA}, timeout=timeout,
+            allow_redirects=True, proxies=NO_PROXY, stream=True,
+        )
+        final_url = _clean_url(response.url)
+        response.close()
+        return final_url or url
+    except Exception:
+        return url
 
 
 def resolve_short_link(url: str, timeout: int = 15) -> str:

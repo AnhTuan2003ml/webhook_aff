@@ -49,10 +49,9 @@ NEXUS_URL = os.environ.get("NEXUS_URL", "http://127.0.0.1:5000").rstrip("/")
 _lock = threading.RLock()
 
 _MAX_LOGS = 200
-# Retry: tin chưa gửi được (không chuyển được link / gửi nhóm đích lỗi) sẽ được
-# thử lại ở các lượt sau; quá _MAX_RETRY lần thì bỏ qua để không kẹt mãi.
+# Tin gửi lỗi làm MỐC dừng lại ở tin đó (lượt sau thử lại đúng từ đó, không bỏ
+# sót tin ở giữa); thử quá _MAX_RETRY lần vẫn lỗi thì bỏ qua để không nghẽn.
 _MAX_RETRY = 3
-_MAX_RETRY_QUEUE = 50
 # Nhóm mới thêm: vẫn chuyển tiếp tin đăng trong khoảng này (mặc định 30 phút);
 # tin cũ hơn coi là lịch sử -> chỉ ghi mốc, không chuyển.
 _BASELINE_RECENT_MS = 30 * 60 * 1000
@@ -152,7 +151,6 @@ def _load_db() -> dict:
     db["settings"] = merged
     db.setdefault("state", {})
     db["state"].setdefault("lastMsgByGroup", {})
-    db["state"].setdefault("retryQueue", [])
     db.setdefault("logs", [])
     db.setdefault("stats", {})
     db["stats"].setdefault("forwarded", 0)
@@ -270,6 +268,20 @@ def _send_to_dest(settings: dict, dest_group_id: str, text: str, thumb: str) -> 
     return {"ok": True, "withPhoto": with_photo}
 
 
+def _is_own_forwarded(msg: dict, settings: dict) -> bool:
+    """Tin CÓ PHẢI do chính webhook đã chuyển tiếp không (đã gắn subId của mình).
+
+    Dùng để tránh lặp vô hạn khi một nhóm vừa là nguồn vừa là đích: tin webhook
+    gửi ra luôn chứa ``sub_id=<subid>`` (Shopee) hoặc ``subId1=<subid>`` (Lazada).
+    Tin thường do người dùng tự gõ KHÔNG bị coi là của webhook -> vẫn chuyển tiếp.
+    """
+    sub = str(settings.get("sub_id") or "").strip()
+    if not sub:
+        return False
+    raw = str(msg.get("title") or "") + " " + str(msg.get("href") or "")
+    return ("sub_id=" + sub) in raw or ("subId1=" + sub) in raw
+
+
 def _convert_message_text(settings: dict, msg: dict):
     """Chuyển toàn bộ link Shopee/Lazada trong 1 tin thành link aff.
 
@@ -278,12 +290,17 @@ def _convert_message_text(settings: dict, msg: dict):
     """
     raw_text = _strip_content_label(msg.get("title"))
     scan_text = " ".join(filter(None, [raw_text, str(msg.get("href") or "")]))
-    links = extract_product_links(scan_text)
+    # resolve_unknown=True: link rút gọn bên thứ ba (dealgiare.com...) dẫn tới
+    # Shopee/Lazada cũng được nhận để chuyển sang mã của mình.
+    links = extract_product_links(scan_text, resolve_unknown=True)
     conversions = []
     new_text = raw_text
     ok_count = 0
     for item in links:
-        conv = convert_product_link(item["url"], item["platform"], settings)
+        # Link lạ đã resolve -> dựng link aff từ URL đích; vẫn thay đúng URL gốc
+        # trong nội dung tin.
+        src = item.get("resolved") or item["url"]
+        conv = convert_product_link(src, item["platform"], settings)
         conversions.append(conv)
         if conv.get("ok"):
             ok_count += 1
@@ -320,7 +337,8 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict) -> dic
     base = {
         "groupId": gid, "groupName": gid,
         "sender": str(msg.get("senderName") or msg.get("senderUid") or ""),
-        "textPreview": (new_text or raw_text)[:220],
+        "textPreview": (new_text or raw_text)[:300],
+        "thumbUrl": str(msg.get("thumb") or ""),
         "links": _link_entries(conversions),
         "msgId": str(msg.get("msgId") or ""),
         "msgTs": int(msg.get("createTime") or 0),
@@ -351,31 +369,12 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict) -> dic
     return out
 
 
-def _enqueue_retry(queue: list, gid: str, msg: dict, failed_dests: list) -> None:
-    """Đưa tin chưa gửi được vào hàng đợi thử lại (gộp nếu đã có cùng msgId)."""
-    mid = str(msg.get("msgId") or "")
-    for it in queue:
-        if it.get("gid") == gid and it.get("msgId") == mid:
-            it["pendingDests"] = sorted(set(it.get("pendingDests") or []) | set(failed_dests))
-            return
-    if len(queue) >= _MAX_RETRY_QUEUE:
-        return  # tránh phình hàng đợi
-    queue.append({
-        "gid": gid, "msgId": mid,
-        "msg": {k: msg.get(k) for k in
-                ("title", "href", "thumb", "senderName", "senderUid", "msgId", "createTime")},
-        "pendingDests": list(failed_dests),
-        "attempts": 0,
-    })
-
-
 def run_forward_once(triggered_by: str = "worker") -> dict:
     """Kiểm tra mọi nhóm nguồn 1 lượt, chuyển link và gửi vào nhóm kết quả."""
     with _lock:
         db = _load_db()
         settings = dict(db["settings"])
         last_by_group = dict(db["state"]["lastMsgByGroup"])
-        retry_queue = list(db["state"].get("retryQueue") or [])
 
     def _finish(ok: bool, message: str, **extra) -> dict:
         with _lock:
@@ -438,115 +437,125 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
 
         # items: đã sắp CŨ -> MỚI, chỉ gồm tin có msgId > mốc (Nexus lọc sẵn).
         items = payload.get("items") or []
-        # Cập nhật MỐC = msgId lớn nhất Nexus thấy (kể cả khi không có tin mới)
-        # để lần sau chỉ lấy tin MỚI HƠN, không lặp lại.
-        latest_mark = str(payload.get("latestMsgId") or since_id or "0")
-        last_by_group[gid] = {
-            "msgId": latest_mark,
-            "ts": int(items[-1].get("createTime") or 0) if items else int(prev.get("ts") or 0),
-        }
+        latest_seen = str(payload.get("latestMsgId") or since_id or "0")
+        # stuck: tin đang bị kẹt (gửi lỗi) của nhóm này, kèm số lần đã thử.
+        stuck = dict(prev.get("stuck") or {})
 
         if is_baseline:
             # Nhóm MỚI (chưa có mốc): chỉ chuyển tin RẤT MỚI (trong _BASELINE_RECENT_MS),
-            # bỏ qua lịch sử cũ; các lần sau lấy TẤT CẢ tin mới kể từ mốc này.
+            # bỏ lịch sử cũ; ghi mốc = tin mới nhất, các lần sau lấy tiếp từ đó.
+            last_by_group[gid] = {
+                "msgId": latest_seen,
+                "ts": int(items[-1].get("createTime") or 0) if items else int(prev.get("ts") or 0),
+            }
             recent_cutoff = int(time.time() * 1000) - _BASELINE_RECENT_MS
             new_items = [it for it in items if int(it.get("createTime") or 0) >= recent_cutoff]
             if not new_items:
                 baseline_count += 1
-                continue  # chỉ có tin cũ -> ghi mốc, không chuyển
-        else:
-            new_items = list(items)  # Nexus đã lọc msgId > mốc
-        if not new_items:
+                continue
+            for it in new_items:
+                new_messages += 1
+                if _is_own_forwarded(it, settings):
+                    continue
+                res = _forward_message(settings, gid,
+                                       [r["dest_group_id"] for r in routes_by_source[gid]], it)
+                if res["no_link"]:
+                    continue
+                with _lock:
+                    d = _load_db()
+                    for entry in res["entries"]:
+                        _append_log(d, entry)
+                        k = "forwarded" if entry["status"].startswith("sent") else "errors"
+                        d["stats"][k] = int(d["stats"][k]) + 1
+                    _save_db(d)
+                forwarded += len(res["sent_dests"])
+                errors += 1 if not res["converted_ok"] else len(res["failed_dests"])
+                time.sleep(0.3)
             continue
 
-        for latest in new_items:
-            msg_id = str(latest.get("msgId") or "")
-            msg_ts = int(latest.get("createTime") or 0)
+        # KHÔNG baseline: xử lý CŨ->MỚI, MỐC CHỈ TIẾN QUA TIN ĐÃ XONG. Gặp tin lỗi
+        # thì DỪNG (mốc giữ ở tin thành công trước đó) để lượt sau tiếp tục ĐÚNG từ
+        # tin lỗi, KHÔNG nhảy lên tin mới nhất -> không bỏ sót tin ở giữa.
+        mark_msg = since_id
+        mark_ts = int(prev.get("ts") or 0)
+        for it in items:
+            mid = str(it.get("msgId") or "")
+            mts = int(it.get("createTime") or 0)
             new_messages += 1
-            if str(latest.get("senderUid") or "") in ("", "0"):
-                continue  # tin của chính tài khoản — bỏ qua để không tự chuyển tiếp
-
-            dest_ids = [r["dest_group_id"] for r in routes_by_source[gid]]
-            res = _forward_message(settings, gid, dest_ids, latest)
+            all_dests = [r["dest_group_id"] for r in routes_by_source[gid]]
+            # Bỏ qua tin do CHÍNH webhook đã chuyển (đã gắn subId của mình) để tránh
+            # lặp vô hạn khi một nhóm vừa là nguồn vừa là đích. Tin thường — kể cả do
+            # chính tài khoản tự gõ — vẫn được chuyển tiếp bình thường.
+            if _is_own_forwarded(it, settings):
+                mark_msg, mark_ts = mid, mts
+                if stuck.get("msgId") == mid:
+                    stuck = {}
+                continue
+            # Nếu là tin đang kẹt -> chỉ gửi các nhóm đích CÒN THIẾU (tránh gửi trùng).
+            dest_ids = (stuck.get("pendingDests") or all_dests) \
+                if stuck.get("msgId") == mid else all_dests
+            res = _forward_message(settings, gid, dest_ids, it)
             if res["no_link"]:
-                continue  # tin không có link Shopee/Lazada
-
+                mark_msg, mark_ts = mid, mts
+                if stuck.get("msgId") == mid:
+                    stuck = {}
+                continue
             with _lock:
                 d = _load_db()
                 for entry in res["entries"]:
                     _append_log(d, entry)
-                    if entry["status"].startswith("sent"):
-                        d["stats"]["forwarded"] = int(d["stats"]["forwarded"]) + 1
-                    else:
-                        d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
+                    k = "forwarded" if entry["status"].startswith("sent") else "errors"
+                    d["stats"][k] = int(d["stats"][k]) + 1
                 _save_db(d)
-
             forwarded += len(res["sent_dests"])
-            errors += 1 if not res["converted_ok"] else len(res["failed_dests"])
-            # Tin chưa gửi được -> đưa vào hàng đợi để thử lại ở lượt sau.
-            if res["failed_dests"]:
-                _enqueue_retry(retry_queue, gid, latest, res["failed_dests"])
 
-            time.sleep(0.3)  # giãn nhẹ giữa các tin cho API Zalo
-
-    # ── Thử lại các tin lỗi ở lượt trước (retry); quá _MAX_RETRY lần thì bỏ qua ──
-    retried_ok = 0
-    retried_drop = 0
-    if retry_queue:
-        kept = []
-        for it in retry_queue:
-            it["attempts"] = int(it.get("attempts") or 0) + 1
-            r_gid = str(it.get("gid") or "")
-            r_msg = it.get("msg") or {}
-            r_dests = list(it.get("pendingDests") or [])
-            if not r_dests:
+            if res["converted_ok"] and not res["failed_dests"]:
+                # Gửi thành công hết -> mốc tiến qua tin này.
+                mark_msg, mark_ts = mid, mts
+                if stuck.get("msgId") == mid:
+                    stuck = {}
+                time.sleep(0.3)
                 continue
-            res = _forward_message(settings, r_gid, r_dests, r_msg)
-            # Chỉ ghi log cho nhóm gửi THÀNH CÔNG lần này (tránh phình lỗi mỗi retry).
-            sent_entries = [e for e in res["entries"] if e["status"].startswith("sent")]
-            if sent_entries:
-                with _lock:
-                    d = _load_db()
-                    for e in sent_entries:
-                        e["retry"] = it["attempts"]
-                        _append_log(d, e)
-                        d["stats"]["forwarded"] = int(d["stats"]["forwarded"]) + 1
-                    _save_db(d)
-                forwarded += len(res["sent_dests"])
-                retried_ok += len(res["sent_dests"])
-            remaining = res["failed_dests"]
-            if not remaining:
-                continue  # đã gửi hết -> xong, bỏ khỏi hàng đợi
-            if it["attempts"] >= _MAX_RETRY:
-                retried_drop += 1
+
+            # Tin lỗi (gửi fail hoặc không chuyển được link nào).
+            errors += 1 if not res["converted_ok"] else len(res["failed_dests"])
+            attempts = (int(stuck.get("attempts") or 0) + 1) if stuck.get("msgId") == mid else 1
+            if attempts >= _MAX_RETRY:
+                # Kẹt quá lâu -> BỎ QUA tin này, mốc tiến qua để không nghẽn tin sau.
                 with _lock:
                     d = _load_db()
                     _append_log(d, {
-                        "groupId": r_gid, "groupName": r_gid, "status": "error",
-                        "error": f"Đã bỏ qua sau {it['attempts']} lần thử (không gửi được).",
-                        "links": [], "textPreview": str(r_msg.get("title") or "")[:220],
-                        "msgId": it.get("msgId"), "skipped": True,
+                        "groupId": gid, "groupName": gid, "status": "error",
+                        "error": f"Đã bỏ qua sau {attempts} lần thử (không gửi được).",
+                        "links": [], "textPreview": str(it.get("title") or "")[:220],
+                        "msgId": mid, "skipped": True,
                     })
                     _save_db(d)
-                continue  # bỏ khỏi hàng đợi
-            it["pendingDests"] = remaining
-            kept.append(it)
-            time.sleep(0.3)
-        retry_queue = kept
+                mark_msg, mark_ts = mid, mts
+                stuck = {}
+                time.sleep(0.3)
+                continue
+            # Chưa tới ngưỡng -> DỪNG tại đây; lượt sau bắt đầu lại đúng từ tin lỗi.
+            stuck = {"msgId": mid, "attempts": attempts, "pendingDests": res["failed_dests"]}
+            break
+
+        new_mark = {"msgId": mark_msg, "ts": mark_ts}
+        if stuck:
+            new_mark["stuck"] = stuck
+        last_by_group[gid] = new_mark
 
     with _lock:
         d = _load_db()
         d["state"]["lastMsgByGroup"] = last_by_group
-        d["state"]["retryQueue"] = retry_queue
+        d["state"].pop("retryQueue", None)  # cơ chế hàng đợi cũ — không dùng nữa
         _save_db(d)
 
     baseline_note = f", {baseline_count} nhóm ghi mốc lần đầu" if baseline_count else ""
-    retry_note = ""
-    if retried_ok or retried_drop or retry_queue:
-        retry_note = (f" | Thử lại: gửi được {retried_ok}, bỏ qua {retried_drop}, "
-                      f"còn chờ {len(retry_queue)}")
+    stuck_groups = sum(1 for m in last_by_group.values()
+                       if isinstance(m, dict) and m.get("stuck"))
+    stuck_note = f" | {stuck_groups} nhóm đang chờ gửi lại tin lỗi" if stuck_groups else ""
     message = (f"Đã kiểm tra {checked}/{len(source_ids)} nhóm nguồn của {len(routes)} luồng: "
-               f"{new_messages} tin mới, chuyển tiếp {forwarded}, lỗi {errors}{baseline_note}{retry_note}.")
+               f"{new_messages} tin mới, chuyển tiếp {forwarded}, lỗi {errors}{baseline_note}{stuck_note}.")
     return _finish(True, message, checkedGroups=checked, newMessages=new_messages,
                    forwarded=forwarded, errors=errors)
 
@@ -660,12 +669,14 @@ def api_test_convert():
     url = str(data.get("url") or "").strip()
     if not url:
         return jsonify({"success": False, "error": "Chưa nhập URL sản phẩm."}), 400
-    links = extract_product_links(url)
+    links = extract_product_links(url, resolve_unknown=True)
     if not links:
-        return jsonify({"success": False, "error": "URL không phải link Shopee/Lazada."}), 400
+        return jsonify({"success": False,
+                        "error": "URL không phải link Shopee/Lazada (và không dẫn tới hai sàn này)."}), 400
     with _lock:
         settings = _load_db()["settings"]
-    result = convert_product_link(links[0]["url"], links[0]["platform"], settings)
+    result = convert_product_link(links[0].get("resolved") or links[0]["url"],
+                                  links[0]["platform"], settings)
     status = 200 if result.get("ok") else 400
     return jsonify({"success": bool(result.get("ok")), **result}), status
 
