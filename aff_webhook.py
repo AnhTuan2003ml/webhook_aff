@@ -420,6 +420,48 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict,
     return out
 
 
+def _force_forward_message(settings: dict, gid: str, dest_ids: list, msg: dict) -> dict:
+    """GỬI LẠI THỦ CÔNG 1 tin vào các nhóm đích — DÙ KHÔNG có link.
+
+    Dùng cho nút "Gửi lại": tin có link -> chuyển link như thường; tin KHÔNG link
+    (thường là ẢNH) -> vẫn gửi nguyên nội dung + ảnh. Ảnh chưa sẵn sàng thì vẫn
+    gửi (``force_text=True``) để bấm là có kết quả ngay.
+    Trả {entries, sent_dests, failed_dests}.
+    """
+    raw_text, new_text, conversions, ok_count, links = _convert_message_text(settings, msg)
+    text = new_text if (links and ok_count) else raw_text
+    thumb = str(msg.get("thumb") or "")
+    out = {"entries": [], "sent_dests": [], "failed_dests": []}
+    if not text.strip() and not thumb:
+        return out  # tin rỗng (không chữ, không ảnh) -> bỏ qua
+    base = {
+        "groupId": gid, "groupName": gid,
+        "sender": str(msg.get("senderName") or msg.get("senderUid") or ""),
+        "textPreview": (text or raw_text)[:300],
+        "thumbUrl": thumb,
+        "links": _link_entries(conversions),
+        "msgId": str(msg.get("msgId") or ""),
+        "msgTs": int(msg.get("createTime") or 0),
+        "manual": True,
+    }
+    delay = _send_delay(settings)
+    for i, dest in enumerate(dest_ids):
+        if i > 0 and delay:
+            time.sleep(delay)
+        sent = _send_to_dest(settings, dest, text, thumb, force_text=True)
+        entry = dict(base)
+        entry["destGroupId"] = dest
+        if sent.get("ok"):
+            entry.update({"status": "sent", "withPhoto": bool(sent.get("withPhoto")), "error": ""})
+            out["sent_dests"].append(dest)
+        else:
+            entry.update({"status": "error", "withPhoto": False,
+                          "error": str(sent.get("message") or "Gửi lại thất bại")})
+            out["failed_dests"].append(dest)
+        out["entries"].append(entry)
+    return out
+
+
 def run_forward_once(triggered_by: str = "worker") -> dict:
     """Kiểm tra mọi nhóm nguồn 1 lượt, chuyển link và gửi vào nhóm kết quả."""
     with _lock:
@@ -741,40 +783,98 @@ def api_run():
 
 @app.route("/api/rerun-from", methods=["POST"])
 def api_rerun_from():
-    """Chạy lại từ (các) tin đã chọn: lùi MỐC của nhóm về TRƯỚC tin sớm nhất được
-    chọn (theo từng nhóm) rồi quét lại — tin đó và các tin sau sẽ được xử lý lại."""
-    global _last_run
+    """GỬI LẠI đúng (các) tin đã chọn KÈM tin ngay TRƯỚC nó, cho nhóm đó thôi.
+
+    KHÔNG lùi mốc, KHÔNG gửi lại các tin sau. Tin trước thường là ẢNH (không link)
+    -> vẫn gửi ảnh. Dùng khi tin đã chuyển thiếu ảnh (ảnh nằm ở tin trước)."""
     data = request.get_json(silent=True) or {}
     items = data.get("items") or []
-    # Gom theo nhóm, lấy msgId NHỎ NHẤT được chọn của mỗi nhóm.
-    min_by_group = {}
+    # Gom các msgId được chọn theo từng nhóm.
+    sel_by_group = {}
     for it in items:
         gid = str(it.get("groupId") or "").strip()
         mid = str(it.get("msgId") or "").strip()
-        if not gid or not mid.isdigit():
-            continue
-        m = int(mid)
-        if gid not in min_by_group or m < min_by_group[gid]:
-            min_by_group[gid] = m
-    if not min_by_group:
-        return jsonify({"success": False, "error": "Chưa chọn tin hợp lệ để chạy lại."}), 400
+        if gid and mid.isdigit():
+            sel_by_group.setdefault(gid, set()).add(int(mid))
+    if not sel_by_group:
+        return jsonify({"success": False, "error": "Chưa chọn tin hợp lệ để gửi lại."}), 400
 
     with _lock:
-        db = _load_db()
-        for gid, m in min_by_group.items():
-            # Lùi mốc về ngay TRƯỚC tin đó (msgId - 1); xóa trạng thái kẹt cũ.
-            db["state"]["lastMsgByGroup"][gid] = {"msgId": str(m - 1), "ts": 0}
-        _save_db(db)
+        settings = dict(_load_db()["settings"])
+    acc_ref = str(settings.get("profile_id") or settings.get("account_id") or "").strip()
+    if not acc_ref:
+        return jsonify({"success": False, "error": "Chưa chọn tài khoản Zalo trên dashboard."}), 400
+    # Nhóm nguồn -> các nhóm đích tương ứng.
+    routes_by_source = {}
+    for r in settings.get("routes") or []:
+        if not (r.get("dest_group_id") and r.get("source_group_ids")):
+            continue
+        for gid in r["source_group_ids"]:
+            routes_by_source.setdefault(gid, []).append(r)
 
     if not _run_lock.acquire(blocking=False):
         return jsonify({"success": False, "error": "Đang có lượt chạy khác, thử lại sau."}), 409
+    sent = 0
+    errors = 0
+    pairs = 0
+    not_found = 0
     try:
-        _last_run = time.time()
-        result = run_forward_once(triggered_by="rerun")
+        for gid, sel in sel_by_group.items():
+            dests = [r["dest_group_id"] for r in routes_by_source.get(gid, [])]
+            if not dests:
+                errors += 1
+                continue
+            # Lấy 1 cửa sổ tin gần đây của nhóm để tìm tin đã chọn + tin ngay trước.
+            try:
+                payload = nexus_get("/api/messages/group-since",
+                                    {"groupId": gid, "profileId": acc_ref,
+                                     "sinceMsgId": "0", "count": 50})
+            except NexusError:
+                errors += 1
+                continue
+            if not payload.get("success"):
+                errors += 1
+                continue
+            win = payload.get("items") or []  # cũ -> mới
+            pos = {str(m.get("msgId")): i for i, m in enumerate(win)}
+            idxs = set()
+            for mid in sel:
+                i = pos.get(str(mid))
+                if i is None:
+                    not_found += 1
+                    continue
+                if i - 1 >= 0:
+                    idxs.add(i - 1)  # tin ngay TRƯỚC (thường là ảnh)
+                idxs.add(i)          # tin đã chọn
+            if not idxs:
+                continue
+            pairs += 1
+            for i in sorted(idxs):  # cũ -> mới: gửi ảnh trước, tin có link sau
+                res = _force_forward_message(settings, gid, dests, win[i])
+                with _lock:
+                    d = _load_db()
+                    for entry in res["entries"]:
+                        _append_log(d, entry)
+                        if entry["status"] == "sent":
+                            d["stats"]["forwarded"] = int(d["stats"]["forwarded"]) + 1
+                        else:
+                            d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
+                    _save_db(d)
+                sent += len(res["sent_dests"])
+                errors += len(res["failed_dests"])
+                time.sleep(_send_delay(settings))
     finally:
         _run_lock.release()
-    result["message"] = f"Đã lùi mốc {len(min_by_group)} nhóm & chạy lại. " + str(result.get("message") or "")
-    return jsonify({"success": result.get("ok", False), **result})
+
+    if not pairs:
+        return jsonify({"success": False,
+                        "error": "Không tìm thấy tin đã chọn trong 50 tin gần đây của nhóm "
+                                 "(tin có thể quá cũ)."}), 400
+    message = (f"Đã gửi lại {pairs} nhóm (mỗi tin kèm tin ngay trước): "
+               f"gửi {sent}, lỗi {errors}"
+               + (f", {not_found} tin không tìm thấy." if not_found else "."))
+    return jsonify({"success": True, "message": message,
+                    "forwarded": sent, "errors": errors, "pairs": pairs})
 
 
 @app.route("/api/test-convert", methods=["POST"])
