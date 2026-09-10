@@ -289,7 +289,9 @@ def _is_own_forwarded(msg: dict, settings: dict) -> bool:
     if not sub:
         return False
     raw = str(msg.get("title") or "") + " " + str(msg.get("href") or "")
-    return ("sub_id=" + sub) in raw or ("subId1=" + sub) in raw
+    # Shopee: sub_id1= (mới) / sub_id= (link cũ); Lazada: subId1=.
+    return (("sub_id1=" + sub) in raw or ("sub_id=" + sub) in raw
+            or ("subId1=" + sub) in raw)
 
 
 def _convert_message_text(settings: dict, msg: dict):
