@@ -366,9 +366,13 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict,
     ``force_text=True`` -> gửi phần text dù ảnh chưa tải được (fallback sau khi chờ).
     """
     raw_text, new_text, conversions, ok_count, links = _convert_message_text(settings, msg)
+    has_photo = bool(str(msg.get("thumb") or "").strip())
+    # no_link chỉ đúng khi tin KHÔNG có link VÀ KHÔNG có ảnh -> mới bỏ qua. Tin chỉ
+    # có ẢNH (người đăng tách ảnh riêng khỏi tin link) vẫn phải được chuyển tiếp.
     out = {"entries": [], "sent_dests": [], "failed_dests": [],
-           "converted_ok": ok_count > 0, "no_link": not links, "image_pending": False}
-    if not links:
+           "converted_ok": ok_count > 0, "no_link": (not links and not has_photo),
+           "image_pending": False}
+    if not links and not has_photo:
         return out
     base = {
         "groupId": gid, "groupName": gid,
@@ -379,7 +383,9 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict,
         "msgId": str(msg.get("msgId") or ""),
         "msgTs": int(msg.get("createTime") or 0),
     }
-    if ok_count == 0:
+    # CÓ link nhưng chuyển KHÔNG được cái nào -> lỗi (đợi/retry). Tin chỉ có ảnh
+    # (links rỗng) KHÔNG rơi vào đây — nó gửi bình thường ở dưới.
+    if links and ok_count == 0:
         entry = dict(base)
         entry.update({"status": "error",
                       "error": "Không chuyển được link nào: "
@@ -519,7 +525,7 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                             d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
                     _save_db(d)
                 forwarded += len(res["sent_dests"])
-                errors += 1 if not res["converted_ok"] else len(res["failed_dests"])
+                errors += len(res["failed_dests"])
                 time.sleep(_send_delay(settings))
             continue
 
@@ -566,8 +572,8 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                 _save_db(d)
             forwarded += len(res["sent_dests"])
 
-            if res["converted_ok"] and not res["failed_dests"]:
-                # Gửi thành công hết -> mốc tiến qua tin này.
+            if not res["failed_dests"]:
+                # Gửi thành công hết (kể cả tin chỉ có ảnh) -> mốc tiến qua tin này.
                 mark_msg, mark_ts = mid, mts
                 if stuck.get("msgId") == mid:
                     stuck = {}
@@ -578,7 +584,7 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
             # hơn, KHÔNG tính là lỗi; (b) lỗi thật (gửi fail / không chuyển được link).
             image_wait = img_wait or bool(res.get("image_pending"))
             if not image_wait:
-                errors += 1 if not res["converted_ok"] else len(res["failed_dests"])
+                errors += len(res["failed_dests"])
             budget = _IMG_MAX_RETRY if image_wait else _MAX_RETRY
             attempts = prev_attempts + 1
             if attempts >= budget:

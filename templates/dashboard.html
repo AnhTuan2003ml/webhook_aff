@@ -258,6 +258,11 @@
     tbody tr:hover { background: #f8fafd; }
     .log-scroll { max-height: 64vh; overflow-y: auto; border: 1px solid var(--border);
         border-radius: 12px; background: var(--panel); }
+    .log-pager { display: flex; align-items: center; justify-content: center; gap: 14px;
+        margin-top: 14px; }
+    .log-pager .pg-info { font-size: 12px; color: var(--muted); }
+    .log-pager .pg-info b { color: var(--text); }
+    .log-pager:empty { display: none; }
 
     .c-time { white-space: nowrap; color: var(--faint); font-size: 11px; margin-top: 7px; }
     .c-thumb { text-align: center; width: 92px; }
@@ -448,6 +453,7 @@
                 </tbody>
             </table>
         </div>
+        <div class="log-pager" id="logPager"></div>
     </section>
 </div>
 
@@ -457,7 +463,9 @@ const S = {
     routes: [],      // [{id, dest, sources:Set}]
     activeRoute: -1, // index luồng đang sửa
     qDest: '', qSrc: '',
+    logsAll: [], logPage: 0,  // nhật ký + phân trang (20 dòng/trang)
 };
+const LOGS_PER_PAGE = 20;
 const qs = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 
@@ -828,68 +836,87 @@ function groupName(gid) {
     return g ? g.name : gid;
 }
 
+const STATUS_LABEL = { sent: 'Đã gửi', sent_partial: 'Gửi 1 phần', error: 'Lỗi' };
+
+// Dựng HTML 1 dòng nhật ký.
+function logRowHtml(l) {
+    const [day, time] = String(l.at || '').split(' ');
+    const src = groupName(l.groupId) || l.groupName || '';
+    const route = `<span class="g" title="${esc(src)}">${esc(src)}</span>`
+        + (l.destGroupId ? `<div class="d">➜ ${esc(groupName(l.destGroupId))}</div>` : '')
+        + (l.sender ? `<div class="s">${esc(l.sender)}</div>` : '')
+        + `<div class="c-time">${esc(time || '')} · ${esc(day || '')}</div>`;
+
+    const textShort = String(l.textPreview || '').replace(/https?:\/\/\S+/g, '🔗');
+    const links = (l.links || []).map(x => {
+        if (!x.ok) {
+            return `<div class="lrow err"><span class="lrow-badge">${esc(x.platform || 'link')}</span>`
+                + `<span class="lrow-err" title="${esc(x.error)}">${esc(x.error || 'Không chuyển được')}</span></div>`;
+        }
+        const kept = x.converted === false;
+        const cls = kept ? 'kept' : (x.platform === 'lazada' ? 'lazada' : 'shopee');
+        const badge = kept ? 'Giữ nguyên' : (x.platform === 'lazada' ? 'Lazada' : 'Shopee');
+        return `<div class="lrow ${cls}"><span class="lrow-badge">${badge}</span>`
+            + `<a class="lrow-url" href="${esc(x.aff)}" target="_blank" rel="noopener" title="${esc(x.aff)}">${esc(x.aff)}</a>`
+            + `<button class="lrow-copy" type="button" data-copy="${esc(x.aff)}" title="Sao chép link">Copy</button></div>`;
+    }).join('');
+    const bodyHtml = (textShort ? `<div class="log-text">${esc(textShort)}</div>` : '')
+        + (links ? `<div class="log-links">${links}</div>` : '')
+        + (l.error && !(l.links || []).length ? `<div class="lchip err" style="margin-top:7px">${esc(l.error)}</div>` : '');
+
+    const thumb = l.thumbUrl
+        ? `<img class="log-thumb" src="${esc(l.thumbUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer"
+               onerror="this.outerHTML='<span class=&quot;log-thumb ph&quot;>🖼</span>'">`
+        : (l.withPhoto ? '<span class="log-thumb ph">🖼</span>' : '<span class="c-nomedia">—</span>');
+
+    const label = l.skipped ? 'Bỏ qua' : (STATUS_LABEL[l.status] || l.status);
+    return `<tr>
+        <td class="c-route">${route}</td>
+        <td class="c-body">${bodyHtml}</td>
+        <td class="c-thumb">${thumb}</td>
+        <td><span class="tag ${esc(l.status)}">${esc(label)}</span></td>
+    </tr>`;
+}
+
+// Vẽ bảng nhật ký theo trang hiện tại (20 dòng/trang) + thanh phân trang.
+function renderLogTable() {
+    const body = qs('logBody');
+    const pager = qs('logPager');
+    const logs = S.logsAll;
+    if (!logs.length) {
+        body.innerHTML = '<tr><td colspan="4" class="empty">Chưa có nhật ký.</td></tr>';
+        if (pager) pager.innerHTML = '';
+        return;
+    }
+    const pages = Math.max(1, Math.ceil(logs.length / LOGS_PER_PAGE));
+    if (S.logPage >= pages) S.logPage = pages - 1;
+    if (S.logPage < 0) S.logPage = 0;
+    const start = S.logPage * LOGS_PER_PAGE;
+    const slice = logs.slice(start, start + LOGS_PER_PAGE);
+    body.innerHTML = slice.map(logRowHtml).join('');
+    body.querySelectorAll('.lrow-copy').forEach(b => b.addEventListener('click', () => {
+        try { navigator.clipboard.writeText(b.dataset.copy || ''); } catch (e) {}
+        const prev = b.textContent;
+        b.textContent = '✓ Đã copy';
+        setTimeout(() => { b.textContent = prev; }, 1200);
+    }));
+    if (pager) {
+        pager.innerHTML = `
+            <button class="btn mini" id="logPrev" ${S.logPage === 0 ? 'disabled' : ''}>‹ Trước</button>
+            <span class="pg-info">Trang <b>${S.logPage + 1}</b>/${pages} · ${logs.length} dòng</span>
+            <button class="btn mini" id="logNext" ${S.logPage >= pages - 1 ? 'disabled' : ''}>Sau ›</button>`;
+        qs('logPrev').addEventListener('click', () => { S.logPage--; renderLogTable(); });
+        qs('logNext').addEventListener('click', () => { S.logPage++; renderLogTable(); });
+    }
+}
+
 async function loadLogs() {
     try {
         const data = await api('/api/logs');
         S.stats = data.stats || {};
         renderStats();
-        const logs = data.logs || [];
-        const body = qs('logBody');
-        if (!logs.length) {
-            body.innerHTML = '<tr><td colspan="4" class="small" style="text-align:center;padding:20px">Chưa có nhật ký.</td></tr>';
-            return;
-        }
-        const statusLabel = { sent: 'Đã gửi', sent_partial: 'Gửi 1 phần', error: 'Lỗi' };
-        body.innerHTML = logs.map(l => {
-            // Cột 1 — NHÓM: nguồn → đích, người gửi, thời gian nhỏ.
-            const [day, time] = String(l.at || '').split(' ');
-            const src = groupName(l.groupId) || l.groupName || '';
-            const route = `<span class="g" title="${esc(src)}">${esc(src)}</span>`
-                + (l.destGroupId ? `<div class="d">➜ ${esc(groupName(l.destGroupId))}</div>` : '')
-                + (l.sender ? `<div class="s">${esc(l.sender)}</div>` : '')
-                + `<div class="c-time">${esc(time || '')} · ${esc(day || '')}</div>`;
-
-            // Cột 2 — NỘI DUNG: rút gọn URL dài trong text thành 🔗 (đọc nội dung cho gọn);
-            // link đầy đủ hiển thị bên dưới ở dạng hàng riêng — xem được, copy, mở tab.
-            const textShort = String(l.textPreview || '').replace(/https?:\/\/\S+/g, '🔗');
-            const links = (l.links || []).map(x => {
-                if (!x.ok) {
-                    return `<div class="lrow err"><span class="lrow-badge">${esc(x.platform || 'link')}</span>`
-                        + `<span class="lrow-err" title="${esc(x.error)}">${esc(x.error || 'Không chuyển được')}</span></div>`;
-                }
-                const kept = x.converted === false;
-                const cls = kept ? 'kept' : (x.platform === 'lazada' ? 'lazada' : 'shopee');
-                const badge = kept ? 'Giữ nguyên' : (x.platform === 'lazada' ? 'Lazada' : 'Shopee');
-                return `<div class="lrow ${cls}"><span class="lrow-badge">${badge}</span>`
-                    + `<a class="lrow-url" href="${esc(x.aff)}" target="_blank" rel="noopener" title="${esc(x.aff)}">${esc(x.aff)}</a>`
-                    + `<button class="lrow-copy" type="button" data-copy="${esc(x.aff)}" title="Sao chép link">Copy</button></div>`;
-            }).join('');
-            const bodyHtml = (textShort ? `<div class="log-text">${esc(textShort)}</div>` : '')
-                + (links ? `<div class="log-links">${links}</div>` : '')
-                + (l.error && !(l.links || []).length ? `<div class="lchip err" style="margin-top:7px">${esc(l.error)}</div>` : '');
-
-            // Cột 3 — ẢNH (nếu có).
-            const thumb = l.thumbUrl
-                ? `<img class="log-thumb" src="${esc(l.thumbUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer"
-                       onerror="this.outerHTML='<span class=&quot;log-thumb ph&quot;>🖼</span>'">`
-                : (l.withPhoto ? '<span class="log-thumb ph">🖼</span>' : '<span class="c-nomedia">—</span>');
-
-            // Cột 4 — TRẠNG THÁI.
-            const label = l.skipped ? 'Bỏ qua' : (statusLabel[l.status] || l.status);
-            return `<tr>
-                <td class="c-route">${route}</td>
-                <td class="c-body">${bodyHtml}</td>
-                <td class="c-thumb">${thumb}</td>
-                <td><span class="tag ${esc(l.status)}">${esc(label)}</span></td>
-            </tr>`;
-        }).join('');
-        // Nút Copy link (sao chép link aff đầy đủ).
-        body.querySelectorAll('.lrow-copy').forEach(b => b.addEventListener('click', () => {
-            try { navigator.clipboard.writeText(b.dataset.copy || ''); } catch (e) {}
-            const prev = b.textContent;
-            b.textContent = '✓ Đã copy';
-            setTimeout(() => { b.textContent = prev; }, 1200);
-        }));
+        S.logsAll = data.logs || [];
+        renderLogTable();
     } catch (err) { /* giữ log cũ khi lỗi tạm thời */ }
 }
 
