@@ -264,6 +264,8 @@
     .log-pager .pg-info b { color: var(--text); }
     .log-pager:empty { display: none; }
 
+    .c-check { text-align: center; width: 34px; }
+    .c-check input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
     .c-time { white-space: nowrap; color: var(--faint); font-size: 11px; margin-top: 7px; }
     .c-thumb { text-align: center; width: 92px; }
     .c-nomedia { color: #cbd5e1; font-size: 16px; }
@@ -439,17 +441,19 @@
 
     <section class="card card-pad log-card">
         <div class="sec-title"><span class="ic">📋</span><h2>Hoạt động</h2>
+            <button class="btn mini" id="btnRerun" title="Tick chọn tin ở cột trái, bấm để lùi mốc về trước tin đó và chạy lại">↻ Chạy lại từ tin đã chọn</button>
             <span class="hint msg" id="statLastMsg">Chưa chạy lần nào</span></div>
         <div class="log-scroll">
             <table>
                 <thead><tr>
+                    <th style="width:34px"></th>
                     <th style="width:200px">Nhóm</th>
                     <th>Nội dung &amp; link</th>
                     <th style="width:92px">Ảnh</th>
                     <th style="width:110px">Trạng thái</th>
                 </tr></thead>
                 <tbody id="logBody">
-                    <tr><td colspan="4" class="empty">Chưa có nhật ký.</td></tr>
+                    <tr><td colspan="5" class="empty">Chưa có nhật ký.</td></tr>
                 </tbody>
             </table>
         </div>
@@ -870,7 +874,12 @@ function logRowHtml(l) {
         : (l.withPhoto ? '<span class="log-thumb ph">🖼</span>' : '<span class="c-nomedia">—</span>');
 
     const label = l.skipped ? 'Bỏ qua' : (STATUS_LABEL[l.status] || l.status);
+    const canPick = l.groupId && l.msgId;
+    const pick = canPick
+        ? `<input type="checkbox" class="log-pick" data-gid="${esc(l.groupId)}" data-msgid="${esc(l.msgId)}" title="Chọn để chạy lại từ tin này">`
+        : '';
     return `<tr>
+        <td class="c-check">${pick}</td>
         <td class="c-route">${route}</td>
         <td class="c-body">${bodyHtml}</td>
         <td class="c-thumb">${thumb}</td>
@@ -884,7 +893,7 @@ function renderLogTable() {
     const pager = qs('logPager');
     const logs = S.logsAll;
     if (!logs.length) {
-        body.innerHTML = '<tr><td colspan="4" class="empty">Chưa có nhật ký.</td></tr>';
+        body.innerHTML = '<tr><td colspan="5" class="empty">Chưa có nhật ký.</td></tr>';
         if (pager) pager.innerHTML = '';
         return;
     }
@@ -992,6 +1001,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     qs('btnRun').addEventListener('click', () => runNow(false));
     qs('btnSend').addEventListener('click', sendManual);
+    qs('btnRerun').addEventListener('click', async () => {
+        const picks = [...document.querySelectorAll('.log-pick:checked')]
+            .map(c => ({ groupId: c.dataset.gid, msgId: c.dataset.msgid }));
+        if (!picks.length) { showStatus('Tick chọn ít nhất 1 tin (ô bên trái) để chạy lại.', 'err'); return; }
+        const btn = qs('btnRerun'); const prev = btn.textContent;
+        btn.disabled = true; btn.textContent = 'Đang chạy lại...';
+        try {
+            const data = await api('/api/rerun-from', { method: 'POST', body: JSON.stringify({ items: picks }) });
+            showStatus(data.message || 'Đã chạy lại.', data.success ? 'ok' : 'err');
+            await loadLogs();
+        } catch (err) { showStatus('Chạy lại lỗi: ' + err.message, 'err'); }
+        finally { btn.disabled = false; btn.textContent = prev; }
+    });
     qs('enabledToggle').addEventListener('change', toggleEnabled);
     qs('accountSelect').addEventListener('change', loadGroups);
     qs('btnReloadNexus').addEventListener('click', loadAccounts);

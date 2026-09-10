@@ -739,6 +739,44 @@ def api_run():
     return jsonify({"success": result.get("ok", False), **result})
 
 
+@app.route("/api/rerun-from", methods=["POST"])
+def api_rerun_from():
+    """Chạy lại từ (các) tin đã chọn: lùi MỐC của nhóm về TRƯỚC tin sớm nhất được
+    chọn (theo từng nhóm) rồi quét lại — tin đó và các tin sau sẽ được xử lý lại."""
+    global _last_run
+    data = request.get_json(silent=True) or {}
+    items = data.get("items") or []
+    # Gom theo nhóm, lấy msgId NHỎ NHẤT được chọn của mỗi nhóm.
+    min_by_group = {}
+    for it in items:
+        gid = str(it.get("groupId") or "").strip()
+        mid = str(it.get("msgId") or "").strip()
+        if not gid or not mid.isdigit():
+            continue
+        m = int(mid)
+        if gid not in min_by_group or m < min_by_group[gid]:
+            min_by_group[gid] = m
+    if not min_by_group:
+        return jsonify({"success": False, "error": "Chưa chọn tin hợp lệ để chạy lại."}), 400
+
+    with _lock:
+        db = _load_db()
+        for gid, m in min_by_group.items():
+            # Lùi mốc về ngay TRƯỚC tin đó (msgId - 1); xóa trạng thái kẹt cũ.
+            db["state"]["lastMsgByGroup"][gid] = {"msgId": str(m - 1), "ts": 0}
+        _save_db(db)
+
+    if not _run_lock.acquire(blocking=False):
+        return jsonify({"success": False, "error": "Đang có lượt chạy khác, thử lại sau."}), 409
+    try:
+        _last_run = time.time()
+        result = run_forward_once(triggered_by="rerun")
+    finally:
+        _run_lock.release()
+    result["message"] = f"Đã lùi mốc {len(min_by_group)} nhóm & chạy lại. " + str(result.get("message") or "")
+    return jsonify({"success": result.get("ok", False), **result})
+
+
 @app.route("/api/test-convert", methods=["POST"])
 def api_test_convert():
     """Thử chuyển 1 URL theo cấu hình hiện tại (kiểm tra aff id / cookie Lazada)."""
