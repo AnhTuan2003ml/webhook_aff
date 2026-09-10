@@ -237,6 +237,13 @@
     .g-item.checked .mark.dot-r { background: var(--ok); border-color: var(--ok); }
     .empty { color: var(--muted); text-align: center; padding: 26px 12px; font-size: 12px; line-height: 1.6; }
 
+    /* ── Gửi tin thủ công ── */
+    .manual-grid { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 14px; align-items: start; }
+    @media (max-width: 700px) { .manual-grid { grid-template-columns: 1fr; } }
+    .manual-side { display: flex; flex-direction: column; gap: 9px; }
+    .manual-side .btn { height: 42px; font-size: 13.5px; }
+    .manual-side .mono { line-height: 1.5; }
+
     /* ── Hoạt động: bảng log ── */
     .log-card { margin-top: 16px; }
     .log-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -354,15 +361,6 @@
                 <p class="hint-p">Gắn vào link Shopee (<code>&amp;sub_id=</code>) và Lazada (<code>subId1=</code>) để biết click/đơn nào đến qua hệ thống.</p>
             </div>
 
-            <div class="field">
-                <label class="fl">Thử chuyển 1 link</label>
-                <div class="inline">
-                    <input type="text" id="testUrl" placeholder="Dán link Shopee / Lazada / rút gọn...">
-                    <button class="btn" id="btnTest">Thử</button>
-                </div>
-                <div class="small mono" id="testResult" style="margin-top:7px"></div>
-            </div>
-
             <details class="adv">
                 <summary>Lazada &amp; nâng cao<span class="sub">Open API · Cookie dự phòng</span></summary>
                 <div class="adv-body">
@@ -408,6 +406,22 @@
             </div>
         </section>
     </div>
+
+    <section class="card card-pad" style="margin-top:16px">
+        <div class="sec-title"><span class="ic">📤</span><h2>Gửi tin thủ công</h2>
+            <span class="hint">Chuyển link → gộp nội dung → gửi vào các nhóm kết quả của luồng</span></div>
+        <div class="manual-grid">
+            <div>
+                <input type="text" id="testUrl" placeholder="Dán link Shopee / Lazada / rút gọn...">
+                <textarea id="manualMsg" rows="3" style="margin-top:8px"
+                    placeholder="Nội dung tin nhắn (tùy chọn) — link đã chuyển sẽ được gộp vào cuối."></textarea>
+            </div>
+            <div class="manual-side">
+                <button class="btn primary" id="btnSend">📤 Chuyển link &amp; gửi</button>
+                <div class="small mono" id="testResult"></div>
+            </div>
+        </div>
+    </section>
 
     <section class="card card-pad log-card">
         <div class="sec-title"><span class="ic">📋</span><h2>Hoạt động</h2>
@@ -900,23 +914,27 @@ async function runNow(silent) {
     } finally { btn.disabled = false; btn.textContent = 'Chạy ngay'; }
 }
 
-async function testConvert() {
+// Gửi thủ công: chuyển link -> gộp với nội dung -> gửi vào (các) NHÓM ĐÍCH của luồng.
+async function sendManual() {
     const url = qs('testUrl').value.trim();
+    const message = qs('manualMsg').value.trim();
     const out = qs('testResult');
-    if (!url) { out.textContent = 'Nhập link sản phẩm trước.'; return; }
-    out.textContent = 'Đang chuyển...';
+    if (!url && !message) { out.textContent = '⚠️ Nhập link hoặc nội dung tin nhắn.'; return; }
+    const btn = qs('btnSend');
+    const prev = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Đang gửi...';
+    out.textContent = 'Đang chuyển link & gửi vào nhóm đích...';
     try {
-        // Lưu aff id / cookie đang gõ trước khi thử để test đúng cấu hình trên form.
+        // Lưu tài khoản + cấu hình aff đang gõ trước khi gửi để dùng đúng cấu hình.
         await saveConfig();
-        const res = await fetch('/api/test-convert', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url }),
+        const data = await api('/api/send-manual', {
+            method: 'POST', body: JSON.stringify({ url, message }),
         });
-        const data = await res.json().catch(() => ({}));
-        out.innerHTML = data.success
-            ? `✅ <a href="${esc(data.link)}" target="_blank" rel="noopener">${esc(data.link)}</a>`
-            : '❌ ' + esc(data.message || data.error || 'Chuyển link thất bại.');
+        out.innerHTML = `✅ Đã gửi vào ${data.sentTo || 0}/${data.totalDest || 0} nhóm đích.` + (data.link
+            ? ` Link aff: <a href="${esc(data.link)}" target="_blank" rel="noopener">${esc(data.link)}</a>` : '');
+        await loadLogs();
     } catch (err) { out.textContent = '❌ ' + err.message; }
+    finally { btn.disabled = false; btn.textContent = prev; }
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -935,7 +953,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         } catch (err) { showStatus('Không lưu được: ' + err.message, 'err'); }
     });
     qs('btnRun').addEventListener('click', () => runNow(false));
-    qs('btnTest').addEventListener('click', testConvert);
+    qs('btnSend').addEventListener('click', sendManual);
     qs('enabledToggle').addEventListener('change', toggleEnabled);
     qs('accountSelect').addEventListener('change', loadGroups);
     qs('btnReloadNexus').addEventListener('click', loadAccounts);

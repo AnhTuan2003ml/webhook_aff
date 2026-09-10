@@ -681,6 +681,59 @@ def api_test_convert():
     return jsonify({"success": bool(result.get("ok")), **result}), status
 
 
+@app.route("/api/send-manual", methods=["POST"])
+def api_send_manual():
+    """Gửi thủ công: chuyển link (nếu có) sang link aff, gộp với nội dung tin
+    nhắn rồi gửi vào (các) NHÓM ĐÍCH cấu hình trong luồng qua Nexus."""
+    data = request.get_json(silent=True) or {}
+    url = str(data.get("url") or "").strip()
+    message = str(data.get("message") or "").strip()
+
+    with _lock:
+        settings = _load_db()["settings"]
+    if not (settings.get("profile_id") or settings.get("account_id")):
+        return jsonify({"success": False, "error": "Chưa chọn tài khoản Zalo trên dashboard."}), 400
+
+    # Nhóm đích = các nhóm kết quả của luồng (khử trùng lặp).
+    dests = []
+    for r in settings.get("routes", []):
+        d = str(r.get("dest_group_id") or "").strip()
+        if d and d not in dests:
+            dests.append(d)
+    if not dests:
+        return jsonify({"success": False,
+                        "error": "Chưa có nhóm kết quả nào trong luồng — hãy chọn nhóm kết quả trước."}), 400
+
+    aff_link = ""
+    if url:
+        links = extract_product_links(url, resolve_unknown=True)
+        if not links:
+            return jsonify({"success": False,
+                            "error": "URL không phải link Shopee/Lazada (và không dẫn tới hai sàn này)."}), 400
+        conv = convert_product_link(links[0].get("resolved") or links[0]["url"],
+                                    links[0]["platform"], settings)
+        if not conv.get("ok"):
+            return jsonify({"success": False, "error": conv.get("message") or "Không chuyển được link."}), 400
+        aff_link = str(conv.get("link") or "").strip()
+
+    # Gộp nội dung tin nhắn + link aff (mỗi phần 1 dòng).
+    final_text = "\n".join(p for p in (message, aff_link) if p).strip()
+    if not final_text:
+        return jsonify({"success": False, "error": "Chưa có nội dung hoặc link để gửi."}), 400
+
+    sent_ok, errors = 0, []
+    for d in dests:
+        sent = _send_to_dest(settings, d, final_text, "")
+        if sent.get("ok"):
+            sent_ok += 1
+        else:
+            errors.append(str(sent.get("message") or "lỗi"))
+    if not sent_ok:
+        return jsonify({"success": False, "error": "Gửi thất bại: " + "; ".join(errors)}), 502
+    return jsonify({"success": True, "link": aff_link, "text": final_text,
+                    "sentTo": sent_ok, "totalDest": len(dests)})
+
+
 @app.route("/api/nexus/accounts", methods=["GET"])
 def api_nexus_accounts():
     """Proxy: danh sách tài khoản từ Nexus (tránh CORS cho dashboard)."""
