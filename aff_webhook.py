@@ -87,6 +87,8 @@ def _default_settings() -> dict:
         # Chu kỳ kiểm tra tính bằng GIÂY. Mặc định 60s: mỗi 60s quét lại nhóm
         # nguồn, thấy tin mới thì chuyển đổi link và gửi nhóm đích.
         "interval_seconds": 60,
+        # Độ trễ giữa các lần gửi tin (giây) — tránh gửi dồn dập bị Zalo chặn.
+        "send_delay_seconds": 3,
         "shopee_aff_id": DEFAULT_SHOPEE_AFF_ID,
         # subId cố định (đối soát click/đơn qua hệ thống) — dùng cho cả Shopee & Lazada.
         "sub_id": DEFAULT_SUB_ID,
@@ -268,6 +270,14 @@ def _send_to_dest(settings: dict, dest_group_id: str, text: str, thumb: str) -> 
     return {"ok": True, "withPhoto": with_photo}
 
 
+def _send_delay(settings: dict) -> int:
+    """Độ trễ (giây) giữa các lần gửi tin — tránh gửi dồn dập. Mặc định 3s."""
+    try:
+        return max(0, int(settings.get("send_delay_seconds", 3)))
+    except Exception:
+        return 3
+
+
 def _is_own_forwarded(msg: dict, settings: dict) -> bool:
     """Tin CÓ PHẢI do chính webhook đã chuyển tiếp không (đã gắn subId của mình).
 
@@ -351,7 +361,10 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict) -> dic
         out["entries"].append(entry)
         out["failed_dests"] = list(dest_ids)  # chưa gửi tới nhóm nào
         return out
-    for dest in dest_ids:
+    delay = _send_delay(settings)
+    for i, dest in enumerate(dest_ids):
+        if i > 0 and delay:
+            time.sleep(delay)  # giãn giữa các nhóm đích, tránh gửi dồn dập
         sent = _send_to_dest(settings, dest, new_text, str(msg.get("thumb") or ""))
         entry = dict(base)
         entry["destGroupId"] = dest
@@ -470,7 +483,7 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                     _save_db(d)
                 forwarded += len(res["sent_dests"])
                 errors += 1 if not res["converted_ok"] else len(res["failed_dests"])
-                time.sleep(0.3)
+                time.sleep(_send_delay(settings))
             continue
 
         # KHÔNG baseline: xử lý CŨ->MỚI, MỐC CHỈ TIẾN QUA TIN ĐÃ XONG. Gặp tin lỗi
@@ -514,7 +527,7 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                 mark_msg, mark_ts = mid, mts
                 if stuck.get("msgId") == mid:
                     stuck = {}
-                time.sleep(0.3)
+                time.sleep(_send_delay(settings))
                 continue
 
             # Tin lỗi (gửi fail hoặc không chuyển được link nào).
@@ -533,7 +546,7 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                     _save_db(d)
                 mark_msg, mark_ts = mid, mts
                 stuck = {}
-                time.sleep(0.3)
+                time.sleep(_send_delay(settings))
                 continue
             # Chưa tới ngưỡng -> DỪNG tại đây; lượt sau bắt đầu lại đúng từ tin lỗi.
             stuck = {"msgId": mid, "attempts": attempts, "pendingDests": res["failed_dests"]}
@@ -623,6 +636,11 @@ def api_config():
                 settings["interval_seconds"] = max(1, int(patch["interval_seconds"]))
             except Exception:
                 settings["interval_seconds"] = 1
+        if "send_delay_seconds" in patch:
+            try:
+                settings["send_delay_seconds"] = max(0, int(patch["send_delay_seconds"]))
+            except Exception:
+                settings["send_delay_seconds"] = 3
         if "shopee_aff_id" in patch:
             settings["shopee_aff_id"] = str(patch["shopee_aff_id"] or "").strip() or DEFAULT_SHOPEE_AFF_ID
         if "sub_id" in patch:
@@ -722,7 +740,10 @@ def api_send_manual():
         return jsonify({"success": False, "error": "Chưa có nội dung hoặc link để gửi."}), 400
 
     sent_ok, errors = 0, []
-    for d in dests:
+    delay = _send_delay(settings)
+    for i, d in enumerate(dests):
+        if i > 0 and delay:
+            time.sleep(delay)  # giãn giữa các nhóm đích, tránh gửi dồn dập
         sent = _send_to_dest(settings, d, final_text, "")
         if sent.get("ok"):
             sent_ok += 1

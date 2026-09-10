@@ -350,9 +350,18 @@
                     </div>
                 </div>
                 <div>
-                    <label class="fl">Shopee affiliate ID</label>
-                    <input type="text" id="shopeeAffId" placeholder="17340820046">
+                    <label class="fl">Độ trễ gửi</label>
+                    <div class="unit-input">
+                        <input type="number" id="sendDelaySeconds" min="0" step="1"
+                               inputmode="numeric" placeholder="3" title="Giãn cách giữa các lần gửi tin (giây) — tránh gửi dồn dập">
+                        <span class="unit">giây</span>
+                    </div>
                 </div>
+            </div>
+
+            <div class="field">
+                <label class="fl">Shopee affiliate ID</label>
+                <input type="text" id="shopeeAffId" placeholder="17340820046">
             </div>
 
             <div class="field">
@@ -472,6 +481,7 @@ async function api(url, options = {}) {
 function fillForm() {
     const st = S.settings;
     qs('intervalSeconds').value = String(st.interval_seconds || 1);
+    qs('sendDelaySeconds').value = String(st.send_delay_seconds ?? 3);
     qs('shopeeAffId').value = st.shopee_aff_id || '';
     qs('subId').value = st.sub_id || '';
     qs('lazadaAppKey').value = st.lazada_app_key || '';
@@ -511,6 +521,7 @@ function collectForm() {
     return {
         profile_id: qs('accountSelect').value,
         interval_seconds: Math.max(1, parseInt(qs('intervalSeconds').value, 10) || 1),
+        send_delay_seconds: Math.max(0, parseInt(qs('sendDelaySeconds').value, 10) || 0),
         shopee_aff_id: qs('shopeeAffId').value.trim(),
         sub_id: qs('subId').value.trim(),
         lazada_app_key: qs('lazadaAppKey').value.trim(),
