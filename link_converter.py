@@ -129,20 +129,27 @@ def lazada_aff_link_api(url: str, app_key: str, app_secret: str, user_token: str
             or _deep_find(payload, "offerPromotionLink")
             or _deep_find(payload, "promotionLink"))
     if not link:
-        # code=0 nhưng không có link: Lazada không tạo được link aff cho URL này
-        # (voucher/khuyến mãi không nhận dạng được, hoặc short link không phân
-        # giải được). GIỮ NGUYÊN link gốc để tin vẫn được chuyển tiếp.
         err = _deep_find(payload, "errorMsg") or _deep_find(payload, "error_msg")
+        # URL VẪN là link rút gọn (chưa phân giải được ra pages/www.lazada.vn) ->
+        # nhiều khả năng LỖI TẠM THỜI khi tải trang h5 -> BÁO LỖI để thử lại,
+        # tránh giữ nguyên link gốc làm MẤT mã aff.
+        host = (urlparse(product_url).hostname or "").lower()
+        if host in _LAZADA_SHORT_HOSTS:
+            return {"ok": False,
+                    "message": f"Chưa phân giải được link Lazada (sẽ thử lại): {err or 'tải trang h5 lỗi'}"}
+        # Đã phân giải ra URL thật mà Lazada vẫn không tạo được link aff (thật sự
+        # không phải sản phẩm) -> GIỮ NGUYÊN link gốc để tin vẫn được chuyển tiếp.
         return {"ok": True, "link": _clean_url(url), "productUrl": product_url,
                 "converted": False,
                 "message": f"Giữ nguyên link (Lazada không tạo được link aff: "
                            f"{err or 'không phải sản phẩm'})"}
 
     link = str(link).strip()
-    # Bảo đảm subId1 có trong link để đối soát (nếu API chưa gắn sẵn). Lazada có
-    # thể trả sẵn dạng sub_id1= (gạch dưới) -> không gắn trùng.
-    if sub_id and "subId1=" not in link and "sub_id1=" not in link:
-        link += ("&" if "?" in link else "?") + "subId1=" + quote(str(sub_id), safe="")
+    # Bảo đảm SubID có trong link để đối soát (nếu API chưa gắn sẵn). Lazada đọc
+    # SubID trong URL dưới dạng sub_id1= (gạch dưới) — dùng đúng dạng này, không
+    # gắn trùng nếu API đã trả sẵn.
+    if sub_id and "sub_id1=" not in link and "subId1=" not in link:
+        link += ("&" if "?" in link else "?") + "sub_id1=" + quote(str(sub_id), safe="")
     return {"ok": True, "link": link, "productUrl": product_url, "converted": True}
 
 
@@ -287,26 +294,33 @@ def resolve_short_link(url: str, timeout: int = 15) -> str:
         return url
 
 
-def _resolve_lazada_h5(url: str, timeout: int = 15) -> str:
+def _resolve_lazada_h5(url: str, timeout: int = 15, retries: int = 3) -> str:
     """Lấy URL Lazada THẬT từ trang rút gọn h5 (s.lazada.vn/s.XXX?t=h5...).
 
     Trang này trả HTTP 200 kèm HTML, không redirect; nó chuyển hướng bằng JS
     (``window.location.href = 'https://pages.lazada.vn/...'``). Ta tải HTML và
-    trích URL pages/www.lazada.vn đầu tiên để đưa vào API getlink. Lỗi thì trả
-    lại URL ban đầu."""
-    try:
-        response = requests.get(url, headers={"User-Agent": BROWSER_UA},
-                                timeout=timeout, proxies=NO_PROXY)
-        html = response.text or ""
-    except Exception:
-        return url
-    m = re.search(
-        r"""window\.location\.href\s*=\s*["'](https?://(?:pages|www)\.lazada\.[^"']+)["']""",
-        html, re.IGNORECASE)
-    if m:
-        return _clean_url(m.group(1))
-    m2 = _LAZADA_REAL_URL_RE.search(html)
-    return _clean_url(m2.group(0)) if m2 else url
+    trích URL pages/www.lazada.vn đầu tiên để đưa vào API getlink.
+
+    Thử lại vài lần để tránh lỗi mạng tạm thời khiến không phân giải được URL
+    (dẫn tới getlink báo Invalid product -> mất mã aff). Vẫn lỗi thì trả URL gốc."""
+    for attempt in range(max(1, retries)):
+        try:
+            response = requests.get(url, headers={"User-Agent": BROWSER_UA},
+                                    timeout=timeout, proxies=NO_PROXY)
+            html = response.text or ""
+            m = re.search(
+                r"""window\.location\.href\s*=\s*["'](https?://(?:pages|www)\.lazada\.[^"']+)["']""",
+                html, re.IGNORECASE)
+            if m:
+                return _clean_url(m.group(1))
+            m2 = _LAZADA_REAL_URL_RE.search(html)
+            if m2:
+                return _clean_url(m2.group(0))
+        except Exception:
+            pass
+        if attempt < retries - 1:
+            time.sleep(1.5)
+    return url
 
 
 def shopee_aff_link(url: str, aff_id: str, sub_id: str = "") -> dict:

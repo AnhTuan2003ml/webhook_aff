@@ -52,6 +52,10 @@ _MAX_LOGS = 200
 # Tin gửi lỗi làm MỐC dừng lại ở tin đó (lượt sau thử lại đúng từ đó, không bỏ
 # sót tin ở giữa); thử quá _MAX_RETRY lần vẫn lỗi thì bỏ qua để không nghẽn.
 _MAX_RETRY = 3
+# Tin CÓ ẢNH nhưng URL ảnh CHƯA SẴN SÀNG (ảnh nặng, CDN chưa xử lý xong): CHỜ và
+# thử lại nhiều lần hơn (tới ~15 lượt ≈ 15 phút nếu chu kỳ 60s) để không gửi
+# thiếu ảnh; quá hạn này mới đành gửi TEXT (không để mất tin).
+_IMG_MAX_RETRY = 15
 # Nhóm mới thêm: vẫn chuyển tiếp tin đăng trong khoảng này (mặc định 30 phút);
 # tin cũ hơn coi là lịch sử -> chỉ ghi mốc, không chuyển.
 _BASELINE_RECENT_MS = 30 * 60 * 1000
@@ -227,23 +231,36 @@ def _strip_content_label(text: str) -> str:
     return text
 
 
-def _download_image(url: str, timeout: int = 30) -> bytes:
-    """Tải ảnh từ CDN Zalo (link có thời hạn — lỗi thì trả b'')."""
+def _download_image(url: str, timeout: int = 30, retries: int = 2) -> bytes:
+    """Tải ảnh từ CDN Zalo. Thử lại vài lần (ảnh nặng / CDN chậm) trước khi bỏ.
+
+    Vòng ngoài đã chờ nhiều lượt (_IMG_MAX_RETRY) nên ở đây chỉ thử nhanh 2 lần
+    để không làm 1 lượt quét treo quá lâu khi ảnh chưa sẵn."""
     url = str(url or "").strip()
     if not url:
         return b""
-    try:
-        response = requests.get(url, headers={"User-Agent": BROWSER_UA},
-                                timeout=timeout, proxies=NO_PROXY)
-        if response.status_code == 200 and response.content:
-            return response.content
-    except Exception as exc:
-        print(f"[aff_webhook] Không tải được ảnh: {exc}", flush=True)
+    headers = {"User-Agent": BROWSER_UA, "Referer": "https://chat.zalo.me/"}
+    for attempt in range(max(1, retries)):
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout, proxies=NO_PROXY)
+            if response.status_code == 200 and response.content:
+                return response.content
+            print(f"[aff_webhook] Ảnh HTTP {response.status_code} (lần {attempt + 1})", flush=True)
+        except Exception as exc:
+            print(f"[aff_webhook] Không tải được ảnh (lần {attempt + 1}): {exc}", flush=True)
+        if attempt < retries - 1:
+            time.sleep(2)
     return b""
 
 
-def _send_to_dest(settings: dict, dest_group_id: str, text: str, thumb: str) -> dict:
-    """Gửi nội dung (kèm ảnh nếu tải được) vào nhóm kết quả qua API Nexus."""
+def _send_to_dest(settings: dict, dest_group_id: str, text: str, thumb: str,
+                  force_text: bool = False) -> dict:
+    """Gửi nội dung (kèm ảnh nếu tải được) vào nhóm kết quả qua API Nexus.
+
+    Tin CÓ ẢNH (``thumb``) mà CHƯA tải được URL ảnh: mặc định KHÔNG gửi thiếu ảnh
+    mà trả ``imageNotReady`` để phía trên CHỜ và thử lại (đợi tới khi có URL ảnh).
+    Chỉ khi ``force_text=True`` (đã chờ quá lâu) mới gửi phần text, bỏ ảnh.
+    """
     data = {
         # Nexus tự tra cookies/zpwEnk/imei theo profileId.
         "profileId": settings.get("profile_id") or settings.get("account_id") or "",
@@ -257,6 +274,10 @@ def _send_to_dest(settings: dict, dest_group_id: str, text: str, thumb: str) -> 
         if image_bytes:
             files = {"photo": (f"aff_{int(time.time() * 1000)}.jpg", image_bytes, "image/jpeg")}
             with_photo = True
+        elif not force_text:
+            # Ảnh chưa tải được (URL chưa sẵn sàng) -> BÁO CHỜ, không gửi thiếu ảnh.
+            return {"ok": False, "withPhoto": False, "imageNotReady": True,
+                    "message": "Ảnh chưa sẵn sàng (chưa tải được URL) — sẽ đợi & thử lại."}
     if not text.strip() and not files:
         return {"ok": False, "withPhoto": False,
                 "message": "Tin không có nội dung chữ và ảnh không tải được."}
@@ -335,15 +356,18 @@ def _link_entries(conversions: list) -> list:
     ]
 
 
-def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict) -> dict:
+def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict,
+                     force_text: bool = False) -> dict:
     """Chuyển link trong 1 tin rồi gửi vào từng nhóm đích trong ``dest_ids``.
 
     Trả dict gồm: entries (log), sent_dests, failed_dests (các nhóm chưa gửi
-    được -> cần thử lại), converted_ok (có chuyển được link nào không), no_link.
+    được -> cần thử lại), converted_ok (có chuyển được link nào không), no_link,
+    image_pending (có nhóm đích chưa gửi được vì ẢNH chưa sẵn sàng -> nên CHỜ).
+    ``force_text=True`` -> gửi phần text dù ảnh chưa tải được (fallback sau khi chờ).
     """
     raw_text, new_text, conversions, ok_count, links = _convert_message_text(settings, msg)
     out = {"entries": [], "sent_dests": [], "failed_dests": [],
-           "converted_ok": ok_count > 0, "no_link": not links}
+           "converted_ok": ok_count > 0, "no_link": not links, "image_pending": False}
     if not links:
         return out
     base = {
@@ -367,7 +391,8 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict) -> dic
     for i, dest in enumerate(dest_ids):
         if i > 0 and delay:
             time.sleep(delay)  # giãn giữa các nhóm đích, tránh gửi dồn dập
-        sent = _send_to_dest(settings, dest, new_text, str(msg.get("thumb") or ""))
+        sent = _send_to_dest(settings, dest, new_text, str(msg.get("thumb") or ""),
+                             force_text=force_text)
         entry = dict(base)
         entry["destGroupId"] = dest
         if sent.get("ok"):
@@ -377,7 +402,12 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict) -> dic
             })
             out["sent_dests"].append(dest)
         else:
-            entry.update({"status": "error", "withPhoto": False,
+            if sent.get("imageNotReady"):
+                out["image_pending"] = True
+                entry["status"] = "waiting_image"
+            else:
+                entry["status"] = "error"
+            entry.update({"withPhoto": False,
                           "error": str(sent.get("message") or "Gửi vào nhóm kết quả thất bại")})
             out["failed_dests"].append(dest)
         out["entries"].append(entry)
@@ -472,16 +502,21 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                 new_messages += 1
                 if _is_own_forwarded(it, settings):
                     continue
+                # Baseline chỉ chạy 1 lần (mốc đã tiến) nên không chờ lại được ảnh:
+                # gửi luôn phần text nếu ảnh chưa sẵn sàng, tránh mất tin.
                 res = _forward_message(settings, gid,
-                                       [r["dest_group_id"] for r in routes_by_source[gid]], it)
+                                       [r["dest_group_id"] for r in routes_by_source[gid]], it,
+                                       force_text=True)
                 if res["no_link"]:
                     continue
                 with _lock:
                     d = _load_db()
                     for entry in res["entries"]:
                         _append_log(d, entry)
-                        k = "forwarded" if entry["status"].startswith("sent") else "errors"
-                        d["stats"][k] = int(d["stats"][k]) + 1
+                        if entry["status"].startswith("sent"):
+                            d["stats"]["forwarded"] = int(d["stats"]["forwarded"]) + 1
+                        elif entry["status"] != "waiting_image":
+                            d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
                     _save_db(d)
                 forwarded += len(res["sent_dests"])
                 errors += 1 if not res["converted_ok"] else len(res["failed_dests"])
@@ -507,9 +542,14 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                     stuck = {}
                 continue
             # Nếu là tin đang kẹt -> chỉ gửi các nhóm đích CÒN THIẾU (tránh gửi trùng).
-            dest_ids = (stuck.get("pendingDests") or all_dests) \
-                if stuck.get("msgId") == mid else all_dests
-            res = _forward_message(settings, gid, dest_ids, it)
+            is_stuck_here = stuck.get("msgId") == mid
+            dest_ids = (stuck.get("pendingDests") or all_dests) if is_stuck_here else all_dests
+            prev_attempts = int(stuck.get("attempts") or 0) if is_stuck_here else 0
+            img_wait = bool(stuck.get("imageWait")) if is_stuck_here else False
+            # Tin CÓ ẢNH: đã chờ đủ _IMG_MAX_RETRY lượt mà vẫn chưa có URL ảnh -> lượt
+            # này gửi TEXT (bỏ ảnh) để không mất tin; còn lại thì vẫn CHỜ ảnh.
+            force_text = img_wait and (prev_attempts + 1 >= _IMG_MAX_RETRY)
+            res = _forward_message(settings, gid, dest_ids, it, force_text=force_text)
             if res["no_link"]:
                 mark_msg, mark_ts = mid, mts
                 if stuck.get("msgId") == mid:
@@ -519,8 +559,10 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                 d = _load_db()
                 for entry in res["entries"]:
                     _append_log(d, entry)
-                    k = "forwarded" if entry["status"].startswith("sent") else "errors"
-                    d["stats"][k] = int(d["stats"][k]) + 1
+                    if entry["status"].startswith("sent"):
+                        d["stats"]["forwarded"] = int(d["stats"]["forwarded"]) + 1
+                    elif entry["status"] != "waiting_image":
+                        d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
                 _save_db(d)
             forwarded += len(res["sent_dests"])
 
@@ -532,16 +574,23 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                 time.sleep(_send_delay(settings))
                 continue
 
-            # Tin lỗi (gửi fail hoặc không chuyển được link nào).
-            errors += 1 if not res["converted_ok"] else len(res["failed_dests"])
-            attempts = (int(stuck.get("attempts") or 0) + 1) if stuck.get("msgId") == mid else 1
-            if attempts >= _MAX_RETRY:
-                # Kẹt quá lâu -> BỎ QUA tin này, mốc tiến qua để không nghẽn tin sau.
+            # Tin CHƯA XONG. Phân biệt: (a) CHỜ ẢNH (URL chưa sẵn sàng) -> chờ lâu
+            # hơn, KHÔNG tính là lỗi; (b) lỗi thật (gửi fail / không chuyển được link).
+            image_wait = img_wait or bool(res.get("image_pending"))
+            if not image_wait:
+                errors += 1 if not res["converted_ok"] else len(res["failed_dests"])
+            budget = _IMG_MAX_RETRY if image_wait else _MAX_RETRY
+            attempts = prev_attempts + 1
+            if attempts >= budget:
+                # Quá hạn: với tin ảnh, lượt này đã force_text (gửi text bỏ ảnh) — nếu
+                # vẫn tới đây nghĩa là ngay text cũng lỗi -> bỏ qua để không nghẽn.
+                reason = ("Đã chờ ảnh quá lâu vẫn chưa có URL -> bỏ qua." if image_wait
+                          else f"Đã bỏ qua sau {attempts} lần thử (không gửi được).")
                 with _lock:
                     d = _load_db()
                     _append_log(d, {
                         "groupId": gid, "groupName": gid, "status": "error",
-                        "error": f"Đã bỏ qua sau {attempts} lần thử (không gửi được).",
+                        "error": reason,
                         "links": [], "textPreview": str(it.get("title") or "")[:220],
                         "msgId": mid, "skipped": True,
                     })
@@ -550,8 +599,10 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                 stuck = {}
                 time.sleep(_send_delay(settings))
                 continue
-            # Chưa tới ngưỡng -> DỪNG tại đây; lượt sau bắt đầu lại đúng từ tin lỗi.
-            stuck = {"msgId": mid, "attempts": attempts, "pendingDests": res["failed_dests"]}
+            # Chưa tới ngưỡng -> DỪNG tại đây; lượt sau bắt đầu lại đúng từ tin này
+            # (nếu chờ ảnh: đợi tới khi CDN có URL ảnh rồi mới gửi kèm ảnh).
+            stuck = {"msgId": mid, "attempts": attempts,
+                     "pendingDests": res["failed_dests"], "imageWait": image_wait}
             break
 
         new_mark = {"msgId": mark_msg, "ts": mark_ts}
