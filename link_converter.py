@@ -338,11 +338,13 @@ def shopee_aff_link(url: str, aff_id: str, sub_id: str = "") -> dict:
     # Bỏ query/fragment (utm, sp_atk... của người đăng) — giữ đường dẫn sản phẩm.
     parsed = urlparse(product_url)
     origin = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-    # Shopee Affiliate chỉ ghi nhận SubID qua sub_id1..sub_id5 (KHÔNG phải sub_id).
+    # Shopee an_redir ghi nhận SubID qua tham số ``sub_id`` (không số) — khi click,
+    # Shopee map nó sang ``utm_content`` của URL đích (đây là "Sub ID" trong báo cáo).
+    # Đã kiểm chứng: sub_id1/subId1 KHÔNG được ghi nhận.
     link = (
         "https://s.shopee.vn/an_redir?origin_link=" + quote(origin, safe="")
         + "&affiliate_id=" + quote(aff_id, safe="")
-        + ("&sub_id1=" + quote(str(sub_id), safe="") if sub_id else "")
+        + ("&sub_id=" + quote(str(sub_id), safe="") if sub_id else "")
     )
     return {"ok": True, "link": link, "productUrl": origin}
 
