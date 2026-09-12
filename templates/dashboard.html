@@ -258,6 +258,18 @@
     tbody tr:hover { background: #f8fafd; }
     .log-scroll { max-height: 64vh; overflow-y: auto; border: 1px solid var(--border);
         border-radius: 12px; background: var(--panel); }
+    .log-tabs { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .log-tab { border: 1px solid var(--border); background: var(--panel); color: var(--muted);
+        font: inherit; font-weight: 700; font-size: 12.5px; height: 32px; padding: 0 13px;
+        border-radius: 999px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+    .log-tab b { display: inline-flex; align-items: center; justify-content: center; min-width: 18px;
+        height: 17px; padding: 0 5px; border-radius: 999px; background: #eef2f7; color: var(--muted);
+        font-size: 10.5px; }
+    .log-tab:hover { border-color: var(--accent); }
+    .log-tab.active[data-f="success"] { background: var(--ok-soft); border-color: #6ee7b7; color: #065f46; }
+    .log-tab.active[data-f="success"] b { background: var(--ok); color: #fff; }
+    .log-tab.active[data-f="fail"] { background: var(--err-soft); border-color: #fca5a5; color: #991b1b; }
+    .log-tab.active[data-f="fail"] b { background: var(--err); color: #fff; }
     .log-pager { display: flex; align-items: center; justify-content: center; gap: 14px;
         margin-top: 14px; }
     .log-pager .pg-info { font-size: 12px; color: var(--muted); }
@@ -443,6 +455,12 @@
         <div class="sec-title"><span class="ic">📋</span><h2>Hoạt động</h2>
             <button class="btn mini" id="btnRerun" title="Tick chọn tin ở cột trái, bấm để GỬI LẠI đúng tin đó + tin ngay trước nó (thường là ảnh) vào nhóm đích — không đụng các tin khác, không đổi mốc">↻ Gửi lại tin đã chọn (+ tin trước)</button>
             <span class="hint msg" id="statLastMsg">Chưa chạy lần nào</span></div>
+        <div class="log-tabs">
+            <button class="log-tab active" data-f="success" id="tabOk">✓ Thành công <b id="cntOk">0</b></button>
+            <button class="log-tab" data-f="fail" id="tabFail">✕ Thất bại <b id="cntFail">0</b></button>
+            <div style="flex:1"></div>
+            <button class="btn mini" id="btnClearLogs" title="Xóa toàn bộ nhật ký + reset thống kê">🗑 Xóa lịch sử</button>
+        </div>
         <div class="log-scroll">
             <table>
                 <thead><tr>
@@ -467,7 +485,7 @@ const S = {
     routes: [],      // [{id, dest, sources:Set}]
     activeRoute: -1, // index luồng đang sửa
     qDest: '', qSrc: '',
-    logsAll: [], logPage: 0,  // nhật ký + phân trang (20 dòng/trang)
+    logsAll: [], logPage: 0, logFilter: 'success',  // nhật ký: phân trang 20/trang + tab thành công/thất bại
 };
 const LOGS_PER_PAGE = 20;
 const qs = (id) => document.getElementById(id);
@@ -888,12 +906,20 @@ function logRowHtml(l) {
 }
 
 // Vẽ bảng nhật ký theo trang hiện tại (20 dòng/trang) + thanh phân trang.
+const isFailLog = l => l.status === 'error' || l.skipped;
+
 function renderLogTable() {
     const body = qs('logBody');
     const pager = qs('logPager');
-    const logs = S.logsAll;
+    // Đếm & cập nhật nhãn tab theo TOÀN BỘ nhật ký.
+    const nFail = S.logsAll.filter(isFailLog).length;
+    const nOk = S.logsAll.length - nFail;
+    if (qs('cntOk')) qs('cntOk').textContent = nOk;
+    if (qs('cntFail')) qs('cntFail').textContent = nFail;
+    // Lọc theo tab đang chọn.
+    const logs = S.logsAll.filter(l => S.logFilter === 'fail' ? isFailLog(l) : !isFailLog(l));
     if (!logs.length) {
-        body.innerHTML = '<tr><td colspan="5" class="empty">Chưa có nhật ký.</td></tr>';
+        body.innerHTML = `<tr><td colspan="5" class="empty">${S.logFilter === 'fail' ? 'Không có tin thất bại. 🎉' : 'Chưa có tin thành công.'}</td></tr>`;
         if (pager) pager.innerHTML = '';
         return;
     }
@@ -1001,6 +1027,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     qs('btnRun').addEventListener('click', () => runNow(false));
     qs('btnSend').addEventListener('click', sendManual);
+    // Tab Thành công / Thất bại.
+    document.querySelectorAll('.log-tab').forEach(t => t.addEventListener('click', () => {
+        S.logFilter = t.dataset.f;
+        S.logPage = 0;
+        document.querySelectorAll('.log-tab').forEach(x => x.classList.toggle('active', x === t));
+        renderLogTable();
+    }));
+    // Xóa lịch sử.
+    qs('btnClearLogs').addEventListener('click', async () => {
+        if (!confirm('Xóa TOÀN BỘ nhật ký và reset thống kê? Không hoàn tác được.')) return;
+        try {
+            await api('/api/logs/clear', { method: 'POST' });
+            S.logsAll = []; S.logPage = 0;
+            showStatus('Đã xóa lịch sử.', 'ok');
+            await loadLogs();
+        } catch (err) { showStatus('Không xóa được: ' + err.message, 'err'); }
+    });
     qs('btnRerun').addEventListener('click', async () => {
         const picks = [...document.querySelectorAll('.log-pick:checked')]
             .map(c => ({ groupId: c.dataset.gid, msgId: c.dataset.msgid }));

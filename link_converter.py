@@ -133,16 +133,14 @@ def lazada_aff_link_api(url: str, app_key: str, app_secret: str, user_token: str
         # URL VẪN là link rút gọn (chưa phân giải được ra pages/www.lazada.vn) ->
         # nhiều khả năng LỖI TẠM THỜI khi tải trang h5 -> BÁO LỖI để thử lại,
         # tránh giữ nguyên link gốc làm MẤT mã aff.
+        # KHÔNG tạo được link aff -> BÁO LỖI để thử lại, KHÔNG giữ nguyên link gốc
+        # (tránh về hoa hồng người khác).
         host = (urlparse(product_url).hostname or "").lower()
         if host in _LAZADA_SHORT_HOSTS:
             return {"ok": False,
                     "message": f"Chưa phân giải được link Lazada (sẽ thử lại): {err or 'tải trang h5 lỗi'}"}
-        # Đã phân giải ra URL thật mà Lazada vẫn không tạo được link aff (thật sự
-        # không phải sản phẩm) -> GIỮ NGUYÊN link gốc để tin vẫn được chuyển tiếp.
-        return {"ok": True, "link": _clean_url(url), "productUrl": product_url,
-                "converted": False,
-                "message": f"Giữ nguyên link (Lazada không tạo được link aff: "
-                           f"{err or 'không phải sản phẩm'})"}
+        return {"ok": False,
+                "message": f"Lazada chưa tạo được link aff (sẽ thử lại): {err or 'không nhận dạng sản phẩm'}"}
 
     link = str(link).strip()
     # Bảo đảm SubID có trong link để đối soát (nếu API chưa gắn sẵn). Lazada đọc
@@ -335,8 +333,17 @@ def shopee_aff_link(url: str, aff_id: str, sub_id: str = "") -> dict:
     product_url = resolve_short_link(url)
     if classify_product_link(product_url) != "shopee":
         return {"ok": False, "message": f"Không phải link Shopee: {product_url[:120]}"}
-    # Bỏ query/fragment (utm, sp_atk... của người đăng) — giữ đường dẫn sản phẩm.
     parsed = urlparse(product_url)
+    host = (parsed.hostname or "").lower()
+    path_only = (parsed.path or "").strip("/")
+    # Link rút gọn (shope.ee...) đôi khi resolve ra trang lỗi (error_page) hoặc VẪN
+    # là link rút gọn (chống bot). KHÔNG dựng link hỏng và KHÔNG giữ nguyên link gốc
+    # (sẽ về hoa hồng người khác) -> BÁO LỖI để thử lại sau.
+    if (host in _SHORT_HOSTS or "error_page" in path_only.lower()
+            or path_only.lower() in ("", "error")):
+        return {"ok": False,
+                "message": f"Chưa phân giải được link Shopee rút gọn (sẽ thử lại): {product_url[:80]}"}
+    # Bỏ query/fragment (utm, sp_atk... của người đăng) — giữ đường dẫn sản phẩm.
     origin = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
     # Shopee an_redir ghi nhận SubID qua tham số ``sub_id`` (không số) — khi click,
     # Shopee map nó sang ``utm_content`` của URL đích (đây là "Sub ID" trong báo cáo).

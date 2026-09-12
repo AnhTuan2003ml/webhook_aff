@@ -766,6 +766,19 @@ def api_logs():
         return jsonify({"success": True, "logs": db["logs"][:100], "stats": db["stats"]})
 
 
+@app.route("/api/logs/clear", methods=["POST"])
+def api_logs_clear():
+    """Xóa toàn bộ nhật ký + reset bộ đếm thống kê."""
+    with _lock:
+        db = _load_db()
+        db["logs"] = []
+        db["stats"]["forwarded"] = 0
+        db["stats"]["errors"] = 0
+        db["stats"]["lastRunMessage"] = "Đã xóa lịch sử."
+        _save_db(db)
+    return jsonify({"success": True})
+
+
 @app.route("/api/run", methods=["POST"])
 @app.route("/webhook/run", methods=["POST", "GET"])
 def api_run():
