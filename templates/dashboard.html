@@ -19,9 +19,50 @@
     [hidden] { display: none !important; }
     body { margin: 0; background: var(--bg); color: var(--text);
         font: 13.5px/1.55 "Segoe UI", system-ui, -apple-system, Arial, sans-serif; }
-    .wrap { max-width: 1440px; margin: 0 auto; padding: 18px 20px 40px; }
     h2 { font-size: 14px; margin: 0; }
     a { color: var(--accent); }
+
+    /* ── Bố cục app: sidebar trái + main phải ── */
+    .app { display: grid; grid-template-columns: 250px minmax(0, 1fr); min-height: 100vh; }
+    .sidebar { position: sticky; top: 0; align-self: start; height: 100vh;
+        background: var(--panel); border-right: 1px solid var(--border);
+        display: flex; flex-direction: column; padding: 18px 14px; gap: 6px; }
+    .side-brand { display: flex; align-items: center; gap: 9px; font-size: 15.5px; font-weight: 800;
+        padding: 4px 8px 14px; }
+    .side-brand .logo { width: 32px; height: 32px; border-radius: 10px; flex-shrink: 0;
+        background: linear-gradient(135deg, var(--accent), #7c3aed); color: #fff;
+        display: inline-flex; align-items: center; justify-content: center; font-size: 17px; }
+    .side-brand .beta { font-size: 9px; font-weight: 800; letter-spacing: .06em; color: var(--accent);
+        border: 1px solid #bfd3ff; background: var(--accent-soft); border-radius: 999px;
+        padding: 1px 6px; margin-left: 4px; }
+    .nav { display: flex; flex-direction: column; gap: 3px; }
+    .nav-item { display: flex; align-items: center; gap: 11px; width: 100%; text-align: left;
+        border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 700;
+        font-size: 13.5px; height: 42px; padding: 0 12px; border-radius: 10px; cursor: pointer;
+        transition: background .15s, color .15s; }
+    .nav-item .ni { font-size: 16px; width: 20px; text-align: center; flex-shrink: 0; }
+    .nav-item:hover { background: var(--accent-soft); color: var(--accent); }
+    .nav-item.active { background: var(--accent); color: #fff; box-shadow: var(--shadow); }
+    .side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 8px;
+        padding-top: 14px; border-top: 1px solid var(--line); }
+    .side-foot .chip, .side-foot .switch { width: 100%; justify-content: flex-start; }
+
+    .main { min-width: 0; padding: 20px 24px 44px; max-width: 1200px; }
+    .topbar-main { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .view-title { font-size: 20px; font-weight: 800; margin: 0; }
+    .view { animation: fade .2s ease; }
+    @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    @media (max-width: 860px) {
+        .app { grid-template-columns: 1fr; }
+        .sidebar { position: static; height: auto; flex-direction: row; flex-wrap: wrap;
+            align-items: center; border-right: 0; border-bottom: 1px solid var(--border); }
+        .side-brand { padding: 4px 8px; }
+        .nav { flex-direction: row; flex-wrap: wrap; }
+        .nav-item { width: auto; height: 36px; }
+        .side-foot { margin: 0 0 0 auto; flex-direction: row; border-top: 0; padding-top: 0; }
+        .side-foot .chip, .side-foot .switch { width: auto; }
+    }
 
     /* ── Thẻ / khối ── */
     .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
@@ -64,6 +105,7 @@
     .btn.primary:hover { background: var(--accent-d); color: #fff; }
     .btn:disabled { opacity: .55; cursor: not-allowed; }
     .btn.mini { height: 28px; padding: 0 10px; font-size: 11.5px; font-weight: 700; border-radius: 8px; }
+    .btn.danger:hover { border-color: var(--err); color: var(--err); background: var(--err-soft); }
     .btn.icon { width: var(--ctl); padding: 0; font-size: 16px; }
 
     .switch { display: inline-flex; align-items: center; gap: 9px; border: 1px solid var(--border);
@@ -256,8 +298,8 @@
     tbody td { padding: 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
     tbody tr:last-child td { border-bottom: 0; }
     tbody tr:hover { background: #f8fafd; }
-    .log-scroll { max-height: 64vh; overflow-y: auto; border: 1px solid var(--border);
-        border-radius: 12px; background: var(--panel); }
+    .log-scroll { max-height: calc(100vh - 230px); min-height: 420px; overflow-y: auto;
+        border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
     .log-tabs { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
     .log-tab { border: 1px solid var(--border); background: var(--panel); color: var(--muted);
         font: inherit; font-weight: 700; font-size: 12.5px; height: 32px; padding: 0 13px;
@@ -321,162 +363,176 @@
 </style>
 </head>
 <body>
-<div class="wrap">
-    <div class="topbar">
-        <span class="brand"><span class="logo">🔗</span>Aff Forwarder<span class="beta">WEBHOOK</span></span>
-        <span class="chip" id="nexusPill" title="Địa chỉ Nexus API cố định trong webhook">
-            <span class="dot" id="nexusDot"></span><span id="nexusPillText">Đang kiểm tra Nexus...</span>
-        </span>
-        <span class="chip mode-off" id="modeChip"
-              title="Khi bật: tự kiểm tra theo chu kỳ. Lượt kiểm tra ĐẦU TIÊN của mỗi nhóm chỉ ghi mốc tin mới nhất (không chuyển tiếp tin cũ); từ lượt sau, tin mới có link Shopee/Lazada được thay bằng link aff của bạn rồi gửi kèm ảnh gốc vào nhóm kết quả.">⏸ Đang tắt</span>
-        <div class="spacer"></div>
-        <button class="btn icon" id="btnReloadNexus" title="Tải lại tài khoản + nhóm từ Nexus">⟳</button>
-        <label class="switch" title="Bật/tắt theo dõi tự động">
-            <input type="checkbox" id="enabledToggle">
-            <span class="track"></span>
-            <span class="st" id="enabledText">Đang tắt</span>
-        </label>
-        <button class="btn primary" id="btnRun">▶ Chạy ngay</button>
-    </div>
+<div class="app">
+    <aside class="sidebar">
+        <div class="side-brand"><span class="logo">🔗</span><span>Aff Forwarder<span class="beta">WEBHOOK</span></span></div>
+        <nav class="nav">
+            <button class="nav-item active" data-view="overview"><span class="ni">📊</span>Tổng quan</button>
+            <button class="nav-item" data-view="logs"><span class="ni">📋</span>Hoạt động</button>
+            <button class="nav-item" data-view="manual"><span class="ni">📤</span>Gửi thủ công</button>
+            <button class="nav-item" data-view="config"><span class="ni">⚙️</span>Cấu hình</button>
+        </nav>
+        <div class="side-foot">
+            <span class="chip" id="nexusPill" title="Địa chỉ Nexus API cố định trong webhook">
+                <span class="dot" id="nexusDot"></span><span id="nexusPillText">Đang kiểm tra Nexus...</span></span>
+            <span class="chip mode-off" id="modeChip"
+                  title="Khi bật: tự kiểm tra theo chu kỳ. Lượt kiểm tra đầu tiên của mỗi nhóm chỉ ghi mốc, từ lượt sau mới chuyển tiếp tin mới.">⏸ Đang tắt</span>
+            <label class="switch" title="Bật/tắt theo dõi tự động">
+                <input type="checkbox" id="enabledToggle">
+                <span class="track"></span>
+                <span class="st" id="enabledText">Đang tắt</span>
+            </label>
+        </div>
+    </aside>
 
-    <div class="statusbar" id="statusBar"></div>
+    <main class="main">
+        <div class="topbar-main">
+            <h1 class="view-title" id="viewTitle">Tổng quan</h1>
+            <div class="spacer"></div>
+            <button class="btn icon" id="btnReloadNexus" title="Tải lại tài khoản + nhóm từ Nexus">⟳</button>
+            <button class="btn primary" id="btnRun">▶ Chạy ngay</button>
+        </div>
 
-    <div class="stats">
-        <div class="stat"><span class="si g">✓</span><span class="sv">
-            <div class="num" id="statForwarded">0</div><div class="lbl">Đã chuyển tiếp</div></span></div>
-        <div class="stat"><span class="si r">!</span><span class="sv">
-            <div class="num" id="statErrors">0</div><div class="lbl">Lỗi</div></span></div>
-        <div class="stat"><span class="si b">🕐</span><span class="sv">
-            <div class="num" id="statLastRun">—</div><div class="lbl">Lần chạy gần nhất</div></span></div>
-    </div>
+        <div class="statusbar" id="statusBar"></div>
 
-    <div class="layout">
-        <section class="card card-pad settings-card">
-            <div class="sec-title"><span class="ic">⚙️</span><h2>Cấu hình</h2></div>
-
-            <div class="field">
-                <label class="fl">Tài khoản Zalo</label>
-                <select id="accountSelect"><option value="">— Chưa tải được tài khoản —</option></select>
+        <!-- ── TỔNG QUAN: thống kê + luồng ── -->
+        <div class="view" id="view-overview">
+            <div class="stats">
+                <div class="stat"><span class="si g">✓</span><span class="sv">
+                    <div class="num" id="statForwarded">0</div><div class="lbl">Đã chuyển tiếp</div></span></div>
+                <div class="stat"><span class="si r">!</span><span class="sv">
+                    <div class="num" id="statErrors">0</div><div class="lbl">Lỗi</div></span></div>
+                <div class="stat"><span class="si b">🕐</span><span class="sv">
+                    <div class="num" id="statLastRun">—</div><div class="lbl">Lần chạy gần nhất</div></span></div>
             </div>
+            <section class="card card-pad">
+                <div class="sec-title"><span class="ic">🔀</span><h2>Luồng chuyển tiếp</h2>
+                    <span class="hint">Chọn nhóm kết quả trước, rồi tick các nhóm nguồn</span></div>
+                <div class="flow-row" id="flowRow">
+                    <button type="button" class="flow-add" id="btnAddRoute">＋ Thêm luồng</button>
+                </div>
+                <div class="route-editor" id="routeEditor">
+                    <div class="editor-empty">Bấm "＋ Thêm luồng" để bắt đầu.</div>
+                </div>
+            </section>
+        </div>
 
-            <div class="field row2">
-                <div>
-                    <label class="fl">Chu kỳ kiểm tra</label>
-                    <div class="unit-input">
-                        <input type="number" id="intervalSeconds" min="1" step="1"
-                               inputmode="numeric" placeholder="1" title="Số giây giữa 2 lượt kiểm tra (tối thiểu 1)">
-                        <span class="unit">giây</span>
+        <!-- ── HOẠT ĐỘNG: nhật ký ── -->
+        <div class="view" id="view-logs" hidden>
+            <section class="card card-pad log-card">
+                <div class="log-tabs">
+                    <button class="log-tab active" data-f="success" id="tabOk">✓ Thành công <b id="cntOk">0</b></button>
+                    <button class="log-tab" data-f="fail" id="tabFail">✕ Thất bại <b id="cntFail">0</b></button>
+                    <div style="flex:1"></div>
+                    <button class="btn mini" id="btnRerun" title="Tick chọn tin ở cột trái, bấm để GỬI LẠI đúng tin đó + tin ngay trước nó (thường là ảnh) vào nhóm đích — không đụng các tin khác, không đổi mốc">↻ Gửi lại tin chọn (+ tin trước)</button>
+                    <button class="btn mini danger" id="btnClearLogs" title="Xóa nhật ký của tab đang xem">🗑 Xóa</button>
+                </div>
+                <div class="log-scroll">
+                    <table>
+                        <thead><tr>
+                            <th style="width:34px"></th>
+                            <th style="width:200px">Nhóm</th>
+                            <th>Nội dung &amp; link</th>
+                            <th style="width:92px">Ảnh</th>
+                            <th style="width:110px">Trạng thái</th>
+                        </tr></thead>
+                        <tbody id="logBody">
+                            <tr><td colspan="5" class="empty">Chưa có nhật ký.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="log-pager" id="logPager"></div>
+            </section>
+        </div>
+
+        <!-- ── GỬI THỦ CÔNG ── -->
+        <div class="view" id="view-manual" hidden>
+            <section class="card card-pad">
+                <div class="sec-title"><span class="ic">📤</span><h2>Gửi tin thủ công</h2>
+                    <span class="hint">Chuyển link → gộp nội dung → gửi vào các nhóm kết quả của luồng</span></div>
+                <div class="manual-grid">
+                    <div>
+                        <input type="text" id="testUrl" placeholder="Dán link Shopee / Lazada / rút gọn...">
+                        <textarea id="manualMsg" rows="3" style="margin-top:8px"
+                            placeholder="Nội dung tin nhắn (tùy chọn) — link đã chuyển sẽ được gộp vào cuối."></textarea>
+                    </div>
+                    <div class="manual-side">
+                        <button class="btn primary" id="btnSend">📤 Chuyển link &amp; gửi</button>
+                        <div class="small mono" id="testResult"></div>
                     </div>
                 </div>
-                <div>
-                    <label class="fl">Độ trễ gửi</label>
-                    <div class="unit-input">
-                        <input type="number" id="sendDelaySeconds" min="0" step="1"
-                               inputmode="numeric" placeholder="3" title="Giãn cách giữa các lần gửi tin (giây) — tránh gửi dồn dập">
-                        <span class="unit">giây</span>
-                    </div>
+            </section>
+        </div>
+
+        <!-- ── CẤU HÌNH ── -->
+        <div class="view" id="view-config" hidden>
+            <section class="card card-pad settings-card">
+                <div class="sec-title"><span class="ic">⚙️</span><h2>Cấu hình</h2></div>
+                <div class="field">
+                    <label class="fl">Tài khoản Zalo</label>
+                    <select id="accountSelect"><option value="">— Chưa tải được tài khoản —</option></select>
                 </div>
-            </div>
-
-            <div class="field">
-                <label class="fl">Shopee affiliate ID</label>
-                <input type="text" id="shopeeAffId" placeholder="17340820046">
-            </div>
-
-            <div class="field">
-                <label class="fl">SubID cố định (đối soát click/đơn)</label>
-                <input type="text" id="subId" placeholder="nexus">
-                <p class="hint-p">Gắn vào link Shopee (<code>sub_id=</code>) và Lazada (<code>subId1=</code>) để biết click/đơn nào đến qua hệ thống.</p>
-            </div>
-
-            <details class="adv">
-                <summary>Lazada &amp; nâng cao<span class="sub">Open API · Cookie dự phòng</span></summary>
-                <div class="adv-body">
-                    <div class="field">
-                        <label class="fl">Lazada User Token</label>
-                        <input type="text" id="lazadaUserToken" placeholder="User Token">
-                    </div>
-                    <div class="field">
-                        <label class="fl">Lazada Open API (LiteApp)</label>
-                        <div class="row2">
-                            <input type="text" id="lazadaAppKey" placeholder="App Key (VD: 105827)">
-                            <input type="text" id="lazadaAppSecret" placeholder="App Secret">
+                <div class="field row2">
+                    <div>
+                        <label class="fl">Chu kỳ kiểm tra</label>
+                        <div class="unit-input">
+                            <input type="number" id="intervalSeconds" min="1" step="1"
+                                   inputmode="numeric" placeholder="1" title="Số giây giữa 2 lượt kiểm tra (tối thiểu 1)">
+                            <span class="unit">giây</span>
                         </div>
-                        <p class="hint-p">Ưu tiên Open API để lấy link Lazada (ổn định, không hết hạn). Cookie chỉ dùng dự phòng khi API lỗi.</p>
                     </div>
-                    <div class="field">
-                        <label class="fl">Cookie Lazada <span style="font-weight:400;color:var(--faint)">(dự phòng)</span></label>
-                        <div class="cookie-line">
-                            <span class="ck-state" id="cookieState">Chưa có cookie</span>
-                            <button class="btn mini" id="btnCookieEdit">Dán cookie</button>
+                    <div>
+                        <label class="fl">Độ trễ gửi</label>
+                        <div class="unit-input">
+                            <input type="number" id="sendDelaySeconds" min="0" step="1"
+                                   inputmode="numeric" placeholder="3" title="Giãn cách giữa các lần gửi tin (giây) — tránh gửi dồn dập">
+                            <span class="unit">giây</span>
                         </div>
-                        <textarea id="lazadaCookie" rows="4" hidden
-                            placeholder="Dán chuỗi Cookie header HOẶC copy nguyên bảng cookies từ DevTools (Application → Cookies của adsense.lazada.vn)..."
-                            spellcheck="false"></textarea>
                     </div>
                 </div>
-            </details>
-
-            <div class="save-row">
-                <button class="btn primary" id="btnSave">Lưu cấu hình</button>
-            </div>
-            <div class="small" id="saveHint" style="margin-top:8px;text-align:center"></div>
-        </section>
-
-        <section class="card card-pad">
-            <div class="sec-title"><span class="ic">🔀</span><h2>Luồng chuyển tiếp</h2>
-                <span class="hint">Chọn nhóm kết quả trước, rồi tick các nhóm nguồn</span></div>
-            <div class="flow-row" id="flowRow">
-                <button type="button" class="flow-add" id="btnAddRoute">＋ Thêm luồng</button>
-            </div>
-            <div class="route-editor" id="routeEditor">
-                <div class="editor-empty">Bấm "＋ Thêm luồng" để bắt đầu.</div>
-            </div>
-        </section>
-    </div>
-
-    <section class="card card-pad" style="margin-top:16px">
-        <div class="sec-title"><span class="ic">📤</span><h2>Gửi tin thủ công</h2>
-            <span class="hint">Chuyển link → gộp nội dung → gửi vào các nhóm kết quả của luồng</span></div>
-        <div class="manual-grid">
-            <div>
-                <input type="text" id="testUrl" placeholder="Dán link Shopee / Lazada / rút gọn...">
-                <textarea id="manualMsg" rows="3" style="margin-top:8px"
-                    placeholder="Nội dung tin nhắn (tùy chọn) — link đã chuyển sẽ được gộp vào cuối."></textarea>
-            </div>
-            <div class="manual-side">
-                <button class="btn primary" id="btnSend">📤 Chuyển link &amp; gửi</button>
-                <div class="small mono" id="testResult"></div>
-            </div>
+                <div class="field">
+                    <label class="fl">Shopee affiliate ID</label>
+                    <input type="text" id="shopeeAffId" placeholder="17340820046">
+                </div>
+                <div class="field">
+                    <label class="fl">SubID cố định (đối soát click/đơn)</label>
+                    <input type="text" id="subId" placeholder="nexus">
+                    <p class="hint-p">Gắn vào link Shopee (<code>sub_id=</code>) và Lazada (<code>subId1=</code>) để biết click/đơn nào đến qua hệ thống.</p>
+                </div>
+                <details class="adv">
+                    <summary>Lazada &amp; nâng cao<span class="sub">Open API · Cookie dự phòng</span></summary>
+                    <div class="adv-body">
+                        <div class="field">
+                            <label class="fl">Lazada User Token</label>
+                            <input type="text" id="lazadaUserToken" placeholder="User Token">
+                        </div>
+                        <div class="field">
+                            <label class="fl">Lazada Open API (LiteApp)</label>
+                            <div class="row2">
+                                <input type="text" id="lazadaAppKey" placeholder="App Key (VD: 105827)">
+                                <input type="text" id="lazadaAppSecret" placeholder="App Secret">
+                            </div>
+                            <p class="hint-p">Ưu tiên Open API để lấy link Lazada (ổn định, không hết hạn). Cookie chỉ dùng dự phòng khi API lỗi.</p>
+                        </div>
+                        <div class="field">
+                            <label class="fl">Cookie Lazada <span style="font-weight:400;color:var(--faint)">(dự phòng)</span></label>
+                            <div class="cookie-line">
+                                <span class="ck-state" id="cookieState">Chưa có cookie</span>
+                                <button class="btn mini" id="btnCookieEdit">Dán cookie</button>
+                            </div>
+                            <textarea id="lazadaCookie" rows="4" hidden
+                                placeholder="Dán chuỗi Cookie header HOẶC copy nguyên bảng cookies từ DevTools (Application → Cookies của adsense.lazada.vn)..."
+                                spellcheck="false"></textarea>
+                        </div>
+                    </div>
+                </details>
+                <div class="save-row">
+                    <button class="btn primary" id="btnSave">Lưu cấu hình</button>
+                </div>
+                <div class="small" id="saveHint" style="margin-top:8px;text-align:center"></div>
+            </section>
         </div>
-    </section>
-
-    <section class="card card-pad log-card">
-        <div class="sec-title"><span class="ic">📋</span><h2>Hoạt động</h2>
-            <button class="btn mini" id="btnRerun" title="Tick chọn tin ở cột trái, bấm để GỬI LẠI đúng tin đó + tin ngay trước nó (thường là ảnh) vào nhóm đích — không đụng các tin khác, không đổi mốc">↻ Gửi lại tin đã chọn (+ tin trước)</button>
-            <span class="hint msg" id="statLastMsg">Chưa chạy lần nào</span></div>
-        <div class="log-tabs">
-            <button class="log-tab active" data-f="success" id="tabOk">✓ Thành công <b id="cntOk">0</b></button>
-            <button class="log-tab" data-f="fail" id="tabFail">✕ Thất bại <b id="cntFail">0</b></button>
-            <div style="flex:1"></div>
-            <button class="btn mini" id="btnClearLogs" title="Xóa toàn bộ nhật ký + reset thống kê">🗑 Xóa lịch sử</button>
-        </div>
-        <div class="log-scroll">
-            <table>
-                <thead><tr>
-                    <th style="width:34px"></th>
-                    <th style="width:200px">Nhóm</th>
-                    <th>Nội dung &amp; link</th>
-                    <th style="width:92px">Ảnh</th>
-                    <th style="width:110px">Trạng thái</th>
-                </tr></thead>
-                <tbody id="logBody">
-                    <tr><td colspan="5" class="empty">Chưa có nhật ký.</td></tr>
-                </tbody>
-            </table>
-        </div>
-        <div class="log-pager" id="logPager"></div>
-    </section>
+    </main>
 </div>
 
 <script>
@@ -849,8 +905,8 @@ function renderStats() {
     qs('statErrors').textContent = S.stats.errors ?? 0;
     qs('statLastRun').textContent = (S.stats.lastRunAt || '—').slice(11) || '—';
     qs('statLastRun').title = S.stats.lastRunAt || '';
-    qs('statLastMsg').textContent = S.stats.lastRunMessage || '';
-    qs('statLastMsg').title = S.stats.lastRunMessage || '';
+    const lm = qs('statLastMsg');
+    if (lm) { lm.textContent = S.stats.lastRunMessage || ''; lm.title = S.stats.lastRunMessage || ''; }
 }
 
 function groupName(gid) {
@@ -1027,23 +1083,44 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     qs('btnRun').addEventListener('click', () => runNow(false));
     qs('btnSend').addEventListener('click', sendManual);
+    // Nhãn nút Xóa đổi theo tab đang xem (xóa đúng loại đang xem).
+    function updateClearBtn() {
+        const fail = S.logFilter === 'fail';
+        qs('btnClearLogs').textContent = fail ? '🗑 Xóa tin thất bại' : '🗑 Xóa tin thành công';
+        qs('btnClearLogs').title = fail
+            ? 'Xóa toàn bộ nhật ký THẤT BẠI (reset bộ đếm lỗi)'
+            : 'Xóa toàn bộ nhật ký THÀNH CÔNG (reset bộ đếm đã chuyển tiếp)';
+    }
     // Tab Thành công / Thất bại.
     document.querySelectorAll('.log-tab').forEach(t => t.addEventListener('click', () => {
         S.logFilter = t.dataset.f;
         S.logPage = 0;
         document.querySelectorAll('.log-tab').forEach(x => x.classList.toggle('active', x === t));
+        updateClearBtn();
         renderLogTable();
     }));
-    // Xóa lịch sử.
+    updateClearBtn();
+    // Xóa lịch sử — chỉ xóa loại đang xem (thành công / thất bại).
     qs('btnClearLogs').addEventListener('click', async () => {
-        if (!confirm('Xóa TOÀN BỘ nhật ký và reset thống kê? Không hoàn tác được.')) return;
+        const fail = S.logFilter === 'fail';
+        const which = fail ? 'fail' : 'success';
+        const label = fail ? 'THẤT BẠI' : 'THÀNH CÔNG';
+        if (!confirm(`Xóa toàn bộ nhật ký ${label}? Không hoàn tác được.`)) return;
         try {
-            await api('/api/logs/clear', { method: 'POST' });
-            S.logsAll = []; S.logPage = 0;
-            showStatus('Đã xóa lịch sử.', 'ok');
+            await api('/api/logs/clear', { method: 'POST', body: JSON.stringify({ which }) });
+            S.logPage = 0;
+            showStatus(`Đã xóa nhật ký ${label.toLowerCase()}.`, 'ok');
             await loadLogs();
         } catch (err) { showStatus('Không xóa được: ' + err.message, 'err'); }
     });
+    // Điều hướng menu dọc: đổi view hiển thị.
+    const VIEW_TITLES = { overview: 'Tổng quan', logs: 'Hoạt động', manual: 'Gửi thủ công', config: 'Cấu hình' };
+    document.querySelectorAll('.nav-item').forEach(n => n.addEventListener('click', () => {
+        const v = n.dataset.view;
+        document.querySelectorAll('.nav-item').forEach(x => x.classList.toggle('active', x === n));
+        document.querySelectorAll('.view').forEach(el => { el.hidden = (el.id !== 'view-' + v); });
+        qs('viewTitle').textContent = VIEW_TITLES[v] || '';
+    }));
     qs('btnRerun').addEventListener('click', async () => {
         const picks = [...document.querySelectorAll('.log-pick:checked')]
             .map(c => ({ groupId: c.dataset.gid, msgId: c.dataset.msgid }));

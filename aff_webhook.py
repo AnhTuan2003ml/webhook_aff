@@ -768,15 +768,28 @@ def api_logs():
 
 @app.route("/api/logs/clear", methods=["POST"])
 def api_logs_clear():
-    """Xóa toàn bộ nhật ký + reset bộ đếm thống kê."""
+    """Xóa nhật ký theo loại: which = 'success' | 'fail' | 'all' (mặc định all)."""
+    data = request.get_json(silent=True) or {}
+    which = str(data.get("which") or "all").strip().lower()
+
+    def _is_fail(l):
+        return str(l.get("status")) == "error" or bool(l.get("skipped"))
+
     with _lock:
         db = _load_db()
-        db["logs"] = []
-        db["stats"]["forwarded"] = 0
-        db["stats"]["errors"] = 0
-        db["stats"]["lastRunMessage"] = "Đã xóa lịch sử."
+        if which == "fail":
+            db["logs"] = [l for l in db["logs"] if not _is_fail(l)]
+            db["stats"]["errors"] = 0
+        elif which == "success":
+            db["logs"] = [l for l in db["logs"] if _is_fail(l)]
+            db["stats"]["forwarded"] = 0
+        else:
+            db["logs"] = []
+            db["stats"]["forwarded"] = 0
+            db["stats"]["errors"] = 0
+        db["stats"]["lastRunMessage"] = f"Đã xóa lịch sử ({which})."
         _save_db(db)
-    return jsonify({"success": True})
+    return jsonify({"success": True, "which": which, "remaining": len(db["logs"])})
 
 
 @app.route("/api/run", methods=["POST"])
