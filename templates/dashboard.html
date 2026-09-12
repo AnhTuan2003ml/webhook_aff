@@ -361,6 +361,7 @@
         font-weight: 700; white-space: nowrap; }
     .tag.sent { background: var(--ok-soft); color: var(--ok); border: 1px solid #6ee7b7; }
     .tag.sent_partial { background: var(--warn-soft); color: var(--warn); border: 1px solid #fcd34d; }
+    .tag.sent_raw { background: var(--warn-soft); color: var(--warn); border: 1px solid #fcd34d; }
     .tag.error { background: var(--err-soft); color: var(--err); border: 1px solid #fca5a5; }
 </style>
 </head>
@@ -916,7 +917,7 @@ function groupName(gid) {
     return g ? g.name : gid;
 }
 
-const STATUS_LABEL = { sent: 'Đã gửi', sent_partial: 'Gửi 1 phần', error: 'Lỗi' };
+const STATUS_LABEL = { sent: 'Đã gửi', sent_partial: 'Gửi 1 phần', sent_raw: 'Gửi (chưa đổi link)', error: 'Lỗi' };
 
 // Dựng HTML 1 dòng nhật ký.
 function logRowHtml(l) {
@@ -930,6 +931,14 @@ function logRowHtml(l) {
     const textShort = String(l.textPreview || '').replace(/https?:\/\/\S+/g, '🔗');
     const links = (l.links || []).map(x => {
         if (!x.ok) {
+            // Không đổi được link -> hệ thống VẪN gửi link gốc. Hiện link gốc + nhãn để biết.
+            const orig = x.original || '';
+            const pf = x.platform === 'lazada' ? 'Lazada' : (x.platform === 'shopee' ? 'Shopee' : (x.platform || 'link'));
+            if (orig) {
+                return `<div class="lrow kept"><span class="lrow-badge" title="${esc(x.error || 'Chưa đổi được link -> gửi link gốc')}">${esc(pf)} · gửi link gốc</span>`
+                    + `<a class="lrow-url" href="${esc(orig)}" target="_blank" rel="noopener" title="${esc(orig)}">${esc(orig)}</a>`
+                    + `<button class="lrow-copy" type="button" data-copy="${esc(orig)}" title="Sao chép link">Copy</button></div>`;
+            }
             return `<div class="lrow err"><span class="lrow-badge">${esc(x.platform || 'link')}</span>`
                 + `<span class="lrow-err" title="${esc(x.error)}">${esc(x.error || 'Không chuyển được')}</span></div>`;
         }

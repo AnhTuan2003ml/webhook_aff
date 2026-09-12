@@ -383,16 +383,9 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict,
         "msgId": str(msg.get("msgId") or ""),
         "msgTs": int(msg.get("createTime") or 0),
     }
-    # CÓ link nhưng chuyển KHÔNG được cái nào -> lỗi (đợi/retry). Tin chỉ có ảnh
-    # (links rỗng) KHÔNG rơi vào đây — nó gửi bình thường ở dưới.
-    if links and ok_count == 0:
-        entry = dict(base)
-        entry.update({"status": "error",
-                      "error": "Không chuyển được link nào: "
-                               + "; ".join(str(c.get("message") or "") for c in conversions)})
-        out["entries"].append(entry)
-        out["failed_dests"] = list(dest_ids)  # chưa gửi tới nhóm nào
-        return out
+    # CÓ link nhưng chuyển KHÔNG được cái nào -> KHÔNG chặn/retry nữa (vòng retry cũ
+    # làm nghẽn mốc, delay lâu). Chuyển tiếp LUÔN tin với link gốc (new_text == raw_text
+    # vì không thay được link nào); log các link ghi rõ ok=false để biết chưa gắn subId.
     delay = _send_delay(settings)
     for i, dest in enumerate(dest_ids):
         if i > 0 and delay:
@@ -402,8 +395,17 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict,
         entry = dict(base)
         entry["destGroupId"] = dest
         if sent.get("ok"):
+            # links rỗng (tin chỉ có ảnh) hoặc đổi được hết -> "sent"; đổi được 1 phần
+            # -> "sent_partial"; CÓ link mà không đổi được cái nào -> "sent_raw"
+            # (gửi nguyên link gốc, chưa gắn subId) để nhật ký nêu rõ.
+            if not conversions or ok_count == len(conversions):
+                status = "sent"
+            elif ok_count > 0:
+                status = "sent_partial"
+            else:
+                status = "sent_raw"
             entry.update({
-                "status": "sent" if ok_count == len(conversions) else "sent_partial",
+                "status": status,
                 "withPhoto": bool(sent.get("withPhoto")), "error": "",
             })
             out["sent_dests"].append(dest)
