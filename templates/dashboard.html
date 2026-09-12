@@ -282,11 +282,16 @@
     .empty { color: var(--muted); text-align: center; padding: 26px 12px; font-size: 12px; line-height: 1.6; }
 
     /* ── Gửi tin thủ công ── */
-    .manual-grid { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 14px; align-items: start; }
-    @media (max-width: 700px) { .manual-grid { grid-template-columns: 1fr; } }
-    .manual-side { display: flex; flex-direction: column; gap: 9px; }
-    .manual-side .btn { height: 42px; font-size: 13.5px; }
-    .manual-side .mono { line-height: 1.5; }
+    .step-row { display: flex; gap: 10px; align-items: center; }
+    .step-row > input[type=text] { flex: 1; min-width: 0; }
+    .step-row > .small { flex: 1; min-width: 0; color: var(--muted); }
+    .step-row .btn { flex-shrink: 0; height: var(--ctl); }
+    .aff-out { margin-top: 12px; }
+    .aff-line { display: flex; gap: 8px; align-items: center; }
+    .aff-line input { flex: 1; min-width: 0; font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+        font-size: 12px; color: var(--accent); background: var(--accent-soft); border-color: #bfd3ff; }
+    #convResult, #sendResult { line-height: 1.5; margin-top: 10px; }
+    @media (max-width: 560px) { .step-row { flex-direction: column; align-items: stretch; } }
 
     /* ── Hoạt động: bảng log ── */
     .log-card { margin-top: 16px; }
@@ -450,20 +455,35 @@
 
         <!-- ── GỬI THỦ CÔNG ── -->
         <div class="view" id="view-manual" hidden>
+            <!-- Bước 1: Chuyển đổi link sản phẩm -> link aff -->
             <section class="card card-pad">
-                <div class="sec-title"><span class="ic">📤</span><h2>Gửi tin thủ công</h2>
-                    <span class="hint">Chuyển link → gộp nội dung → gửi vào các nhóm kết quả của luồng</span></div>
-                <div class="manual-grid">
-                    <div>
-                        <input type="text" id="testUrl" placeholder="Dán link Shopee / Lazada / rút gọn...">
-                        <textarea id="manualMsg" rows="3" style="margin-top:8px"
-                            placeholder="Nội dung tin nhắn (tùy chọn) — link đã chuyển sẽ được gộp vào cuối."></textarea>
-                    </div>
-                    <div class="manual-side">
-                        <button class="btn primary" id="btnSend">📤 Chuyển link &amp; gửi</button>
-                        <div class="small mono" id="testResult"></div>
+                <div class="sec-title"><span class="ic">🔗</span><h2>Chuyển đổi link</h2>
+                    <span class="hint">Dán link sản phẩm Shopee/Lazada → tạo link aff của bạn (có SubID)</span></div>
+                <div class="step-row">
+                    <input type="text" id="testUrl" placeholder="Dán link sản phẩm Shopee / Lazada / rút gọn...">
+                    <button class="btn primary" id="btnConvert">🔗 Chuyển đổi</button>
+                </div>
+                <div class="aff-out" id="affOut" hidden>
+                    <label class="fl">Link aff đã tạo</label>
+                    <div class="aff-line">
+                        <input type="text" id="affLink" readonly>
+                        <button class="btn mini" id="btnCopyAff">Copy</button>
                     </div>
                 </div>
+                <div class="small mono" id="convResult"></div>
+            </section>
+
+            <!-- Bước 2: Gửi vào nhóm đích -->
+            <section class="card card-pad" style="margin-top:16px">
+                <div class="sec-title"><span class="ic">📤</span><h2>Gửi vào nhóm đích</h2>
+                    <span class="hint">Gộp nội dung + link aff rồi gửi vào các nhóm kết quả của luồng</span></div>
+                <textarea id="manualMsg" rows="3"
+                    placeholder="Nội dung tin nhắn (tùy chọn) — link aff đã chuyển ở trên sẽ được gộp vào cuối."></textarea>
+                <div class="step-row" style="margin-top:10px">
+                    <div class="small" id="sendPreview">Chưa có link. Bấm "Chuyển đổi" ở trên hoặc dán link để gửi kèm.</div>
+                    <button class="btn primary" id="btnSend">📤 Gửi</button>
+                </div>
+                <div class="small mono" id="sendResult"></div>
             </section>
         </div>
 
@@ -545,6 +565,7 @@ const S = {
     activeRoute: -1, // index luồng đang sửa
     qDest: '', qSrc: '',
     logsAll: [], logPage: 0, logFilter: 'success',  // nhật ký: phân trang 20/trang + tab thành công/thất bại
+    manualAff: '',   // link aff đã chuyển đổi ở trang Gửi thủ công (bước 1)
 };
 const LOGS_PER_PAGE = 20;
 const qs = (id) => document.getElementById(id);
@@ -1055,17 +1076,55 @@ async function runNow(silent) {
 }
 
 // Gửi thủ công: chuyển link -> gộp với nội dung -> gửi vào (các) NHÓM ĐÍCH của luồng.
+// Bước 1: chỉ CHUYỂN ĐỔI link -> link aff (không gửi).
+async function convertManual() {
+    const url = qs('testUrl').value.trim();
+    const out = qs('convResult');
+    if (!url) { out.textContent = '⚠️ Dán link sản phẩm cần chuyển đổi.'; return; }
+    const btn = qs('btnConvert');
+    const prev = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Đang chuyển...';
+    out.textContent = 'Đang phân giải & tạo link aff...';
+    try {
+        await saveConfig();  // dùng đúng aff id / SubID / cookie đang gõ
+        const data = await api('/api/test-convert', {
+            method: 'POST', body: JSON.stringify({ url }),
+        });
+        const link = String(data.link || '').trim();
+        S.manualAff = link;
+        qs('affLink').value = link;
+        qs('affOut').hidden = !link;
+        out.innerHTML = `✅ Đã tạo link aff (${esc(data.platform || '')}).`;
+        updateSendPreview();
+    } catch (err) {
+        S.manualAff = '';
+        qs('affOut').hidden = true;
+        out.textContent = '❌ ' + err.message;
+        updateSendPreview();
+    }
+    finally { btn.disabled = false; btn.textContent = prev; }
+}
+
+// Cập nhật dòng xem trước cho nút Gửi.
+function updateSendPreview() {
+    const el = qs('sendPreview');
+    if (!el) return;
+    if (S.manualAff) el.innerHTML = `Sẽ gửi kèm link aff: <span class="mono">${esc(S.manualAff)}</span>`;
+    else if (qs('testUrl').value.trim()) el.textContent = 'Sẽ tự chuyển đổi link khi gửi.';
+    else el.textContent = 'Chưa có link. Bấm "Chuyển đổi" ở trên hoặc dán link để gửi kèm.';
+}
+
+// Bước 2: GỬI nội dung + link aff vào các nhóm đích.
 async function sendManual() {
     const url = qs('testUrl').value.trim();
     const message = qs('manualMsg').value.trim();
-    const out = qs('testResult');
+    const out = qs('sendResult');
     if (!url && !message) { out.textContent = '⚠️ Nhập link hoặc nội dung tin nhắn.'; return; }
     const btn = qs('btnSend');
     const prev = btn.textContent;
     btn.disabled = true; btn.textContent = 'Đang gửi...';
-    out.textContent = 'Đang chuyển link & gửi vào nhóm đích...';
+    out.textContent = 'Đang gửi vào nhóm đích...';
     try {
-        // Lưu tài khoản + cấu hình aff đang gõ trước khi gửi để dùng đúng cấu hình.
         await saveConfig();
         const data = await api('/api/send-manual', {
             method: 'POST', body: JSON.stringify({ url, message }),
@@ -1093,7 +1152,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         } catch (err) { showStatus('Không lưu được: ' + err.message, 'err'); }
     });
     qs('btnRun').addEventListener('click', () => runNow(false));
+    // Gửi thủ công: 2 nút riêng — Chuyển đổi (bước 1) và Gửi (bước 2).
+    qs('btnConvert').addEventListener('click', convertManual);
     qs('btnSend').addEventListener('click', sendManual);
+    qs('btnCopyAff').addEventListener('click', async () => {
+        const v = qs('affLink').value;
+        if (!v) return;
+        try { await navigator.clipboard.writeText(v); }
+        catch (e) { qs('affLink').select(); document.execCommand('copy'); }
+        const b = qs('btnCopyAff'); const t = b.textContent;
+        b.textContent = 'Đã copy'; setTimeout(() => { b.textContent = t; }, 1200);
+    });
+    // Gõ/đổi link -> reset link aff cũ + cập nhật xem trước.
+    qs('testUrl').addEventListener('input', () => {
+        S.manualAff = ''; qs('affOut').hidden = true; updateSendPreview();
+    });
     // Nhãn nút Xóa đổi theo tab đang xem (xóa đúng loại đang xem).
     function updateClearBtn() {
         const fail = S.logFilter === 'fail';
