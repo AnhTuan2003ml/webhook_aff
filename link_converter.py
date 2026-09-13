@@ -42,6 +42,12 @@ LAZADA_CONVERT_URL = "https://adsense.lazada.vn/newOffer/link-convert-v2.json"
 LAZADA_API_BASE = "https://api.lazada.vn/rest"
 LAZADA_GETLINK_PATH = "/marketing/getlink"
 
+# ─── Shopee Affiliate Open API (generateShortLink) ───────────────────────────
+# ĐÂY là cách Shopee THỐNG KÊ SubID: link an_redir thủ công KHÔNG được ghi nhận
+# SubID trong báo cáo. generateShortLink nhận subIds[] (tối đa 5) và Shopee map
+# sang utmContent trong báo cáo đối soát. Ký SHA256(appId+timestamp+payload+secret).
+SHOPEE_API_URL = "https://open-api.affiliate.shopee.vn/graphql"
+
 
 def _lazop_sign(secret: str, api_path: str, params: dict) -> str:
     """Chữ ký lazop: HMAC-SHA256(secret, apiPath + concat(sort(key+value))) -> HEX hoa."""
@@ -321,6 +327,78 @@ def _resolve_lazada_h5(url: str, timeout: int = 15, retries: int = 3) -> str:
     return url
 
 
+def _shopee_sign(app_id: str, timestamp: int, payload: str, secret: str) -> str:
+    """Chữ ký Shopee Open API: SHA256(appId + timestamp + payload + secret)."""
+    base = f"{app_id}{timestamp}{payload}{secret}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+def shopee_aff_link_api(url: str, app_id: str, secret: str, sub_id: str = "",
+                        timeout: int = 20) -> dict:
+    """Tạo link affiliate Shopee CHÍNH THỐNG qua Open API generateShortLink.
+
+    SubID được truyền qua ``subIds`` (tối đa 5) -> Shopee ghi nhận vào utmContent
+    của báo cáo đối soát (đây là "Sub ID" thật, khác hẳn link an_redir thủ công
+    vốn KHÔNG được thống kê). Link rút gọn của người khác được resolve về URL sản
+    phẩm sạch trước để hoa hồng ghi đúng tài khoản mình.
+    """
+    app_id = str(app_id or "").strip()
+    secret = str(secret or "").strip()
+    if not (app_id and secret):
+        return {"ok": False, "message": "Chưa cấu hình Shopee App ID / Secret (Open API)."}
+
+    product_url = resolve_short_link(url)
+    if classify_product_link(product_url) != "shopee":
+        return {"ok": False, "message": f"Không phải link Shopee: {product_url[:120]}"}
+    parsed = urlparse(product_url)
+    host = (parsed.hostname or "").lower()
+    path_only = (parsed.path or "").strip("/")
+    # Link rút gọn chưa phân giải / trang lỗi -> BÁO LỖI để thử lại (không tạo link hỏng).
+    if (host in _SHORT_HOSTS or "error_page" in path_only.lower()
+            or path_only.lower() in ("", "error")):
+        return {"ok": False,
+                "message": f"Chưa phân giải được link Shopee rút gọn (sẽ thử lại): {product_url[:80]}"}
+    # Bỏ query/fragment của người đăng (utm, sp_atk...) — giữ đường dẫn sản phẩm.
+    origin = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+    # Dựng mutation inline; json.dumps để escape đúng chuỗi trong GraphQL.
+    origin_lit = json.dumps(origin)
+    sub_ids = [str(sub_id)] if sub_id else []
+    subids_lit = json.dumps(sub_ids)
+    query = ("mutation{generateShortLink(input:{originUrl:%s,subIds:%s}){shortLink}}"
+             % (origin_lit, subids_lit))
+    payload = json.dumps({"query": query}, separators=(",", ":"))
+    timestamp = int(time.time())
+    signature = _shopee_sign(app_id, timestamp, payload, secret)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": (f"SHA256 Credential={app_id}, Timestamp={timestamp}, "
+                          f"Signature={signature}"),
+    }
+    try:
+        response = requests.post(SHOPEE_API_URL, data=payload.encode("utf-8"),
+                                 headers=headers, timeout=timeout, proxies=NO_PROXY)
+        data = response.json()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": f"Không gọi được Shopee Open API: {exc}"}
+
+    link = ""
+    node = (data or {}).get("data") or {}
+    gen = node.get("generateShortLink") if isinstance(node, dict) else None
+    if isinstance(gen, dict):
+        link = str(gen.get("shortLink") or "").strip()
+    if not link:
+        errs = (data or {}).get("errors")
+        msg = ""
+        if isinstance(errs, list) and errs:
+            msg = str(errs[0].get("message") or errs[0].get("code") or "")[:160]
+        elif isinstance(data, dict) and data.get("message"):
+            msg = str(data.get("message"))[:160]
+        return {"ok": False,
+                "message": f"Shopee Open API chưa tạo được link (sẽ thử lại): {msg or 'không rõ'}"}
+    return {"ok": True, "link": link, "productUrl": origin, "converted": True}
+
+
 def shopee_aff_link(url: str, aff_id: str, sub_id: str = "") -> dict:
     """Dựng link affiliate Shopee dạng an_redir từ URL sản phẩm.
 
@@ -416,7 +494,18 @@ def convert_product_link(url: str, platform: str, settings: dict) -> dict:
     settings = settings or {}
     sub_id = str(settings.get("sub_id") or "").strip()
     if platform == "shopee":
-        result = shopee_aff_link(url, settings.get("shopee_aff_id", ""), sub_id)
+        # ƯU TIÊN Open API generateShortLink (Shopee THỐNG KÊ SubID qua utmContent);
+        # thiếu App ID/Secret hoặc API lỗi -> fallback link an_redir (không đối soát SubID).
+        app_id = str(settings.get("shopee_app_id") or settings.get("shopee_aff_id") or "").strip()
+        secret = str(settings.get("shopee_app_secret") or "").strip()
+        if app_id and secret:
+            result = shopee_aff_link_api(url, app_id, secret, sub_id)
+            if not result.get("ok") and settings.get("shopee_aff_id"):
+                fallback = shopee_aff_link(url, settings.get("shopee_aff_id", ""), sub_id)
+                if fallback.get("ok"):
+                    result = fallback
+        else:
+            result = shopee_aff_link(url, settings.get("shopee_aff_id", ""), sub_id)
     elif platform == "lazada":
         app_key = str(settings.get("lazada_app_key") or "").strip()
         app_secret = str(settings.get("lazada_app_secret") or "").strip()

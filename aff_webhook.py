@@ -94,6 +94,10 @@ def _default_settings() -> dict:
         # Độ trễ giữa các lần gửi tin (giây) — tránh gửi dồn dập bị Zalo chặn.
         "send_delay_seconds": 3,
         "shopee_aff_id": DEFAULT_SHOPEE_AFF_ID,
+        # Shopee Affiliate Open API (generateShortLink) — CÁCH DUY NHẤT Shopee thống
+        # kê SubID. Thiếu 2 trường này thì fallback link an_redir (không đối soát SubID).
+        "shopee_app_id": "",
+        "shopee_app_secret": "",
         # subId cố định (đối soát click/đơn qua hệ thống) — dùng cho cả Shopee & Lazada.
         "sub_id": DEFAULT_SUB_ID,
         # Lazada Open API (LiteApp) — ưu tiên; cookie chỉ là fallback.
@@ -746,6 +750,10 @@ def api_config():
                 settings["send_delay_seconds"] = 3
         if "shopee_aff_id" in patch:
             settings["shopee_aff_id"] = str(patch["shopee_aff_id"] or "").strip() or DEFAULT_SHOPEE_AFF_ID
+        if "shopee_app_id" in patch:
+            settings["shopee_app_id"] = str(patch["shopee_app_id"] or "").strip()
+        if "shopee_app_secret" in patch:
+            settings["shopee_app_secret"] = str(patch["shopee_app_secret"] or "").strip()
         if "sub_id" in patch:
             settings["sub_id"] = str(patch["sub_id"] or "").strip()
         if "lazada_app_key" in patch:

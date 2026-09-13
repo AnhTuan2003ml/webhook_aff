@@ -518,9 +518,17 @@
                     <input type="text" id="shopeeAffId" placeholder="17340820046">
                 </div>
                 <div class="field">
+                    <label class="fl">Shopee Open API (đối soát SubID) <span style="font-weight:400;color:var(--faint)">— khuyến nghị</span></label>
+                    <div class="row2">
+                        <input type="text" id="shopeeAppId" placeholder="App ID (Credential)">
+                        <input type="text" id="shopeeAppSecret" placeholder="App Secret">
+                    </div>
+                    <p class="hint-p">Lấy tại <b>Shopee Affiliate → Open API</b>. Có App ID + Secret thì link tạo bằng <code>generateShortLink</code> và SubID mới được Shopee <b>thống kê</b> (vào <code>utmContent</code>). Thiếu → dùng link <code>an_redir</code> (KHÔNG đối soát SubID).</p>
+                </div>
+                <div class="field">
                     <label class="fl">SubID cố định (đối soát click/đơn)</label>
                     <input type="text" id="subId" placeholder="nexus">
-                    <p class="hint-p">Gắn vào link Shopee (<code>sub_id=</code>) và Lazada (<code>subId1=</code>) để biết click/đơn nào đến qua hệ thống.</p>
+                    <p class="hint-p">Gắn vào link Shopee (<code>subIds</code> → utmContent) và Lazada (<code>subId1=</code>) để biết click/đơn nào đến qua hệ thống.</p>
                 </div>
                 <details class="adv">
                     <summary>Lazada &amp; nâng cao<span class="sub">Open API · Cookie dự phòng</span></summary>
@@ -593,6 +601,8 @@ function fillForm() {
     qs('intervalSeconds').value = String(st.interval_seconds || 1);
     qs('sendDelaySeconds').value = String(st.send_delay_seconds ?? 3);
     qs('shopeeAffId').value = st.shopee_aff_id || '';
+    qs('shopeeAppId').value = st.shopee_app_id || '';
+    qs('shopeeAppSecret').value = st.shopee_app_secret || '';
     qs('subId').value = st.sub_id || '';
     qs('lazadaAppKey').value = st.lazada_app_key || '';
     qs('lazadaAppSecret').value = st.lazada_app_secret || '';
@@ -633,6 +643,8 @@ function collectForm() {
         interval_seconds: Math.max(1, parseInt(qs('intervalSeconds').value, 10) || 1),
         send_delay_seconds: Math.max(0, parseInt(qs('sendDelaySeconds').value, 10) || 0),
         shopee_aff_id: qs('shopeeAffId').value.trim(),
+        shopee_app_id: qs('shopeeAppId').value.trim(),
+        shopee_app_secret: qs('shopeeAppSecret').value.trim(),
         sub_id: qs('subId').value.trim(),
         lazada_app_key: qs('lazadaAppKey').value.trim(),
         lazada_app_secret: qs('lazadaAppSecret').value.trim(),
