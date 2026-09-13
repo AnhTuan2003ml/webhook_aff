@@ -59,6 +59,9 @@ _IMG_MAX_RETRY = 15
 # Nhóm mới thêm: vẫn chuyển tiếp tin đăng trong khoảng này (mặc định 30 phút);
 # tin cũ hơn coi là lịch sử -> chỉ ghi mốc, không chuyển.
 _BASELINE_RECENT_MS = 30 * 60 * 1000
+# Số msgId nguồn tối đa giữ trong bản đồ quote (msgId nguồn -> tin đích) để nhóm
+# đích trả lời đúng tin tương ứng; vượt thì bỏ các mốc cũ nhất.
+_FORWARD_MAP_MAX = 1000
 DEFAULT_SHOPEE_AFF_ID = "17340820046"
 # subId CỐ ĐỊNH gắn vào link Shopee (&sub_id=) và Lazada (subId1=) để biết
 # click/đơn nào đến qua hệ thống này khi đối soát ở webhook affiliate.
@@ -258,12 +261,16 @@ def _download_image(url: str, timeout: int = 30, retries: int = 2) -> bytes:
 
 
 def _send_to_dest(settings: dict, dest_group_id: str, text: str, thumb: str,
-                  force_text: bool = False) -> dict:
+                  force_text: bool = False, quote: dict = None) -> dict:
     """Gửi nội dung (kèm ảnh nếu tải được) vào nhóm kết quả qua API Nexus.
 
     Tin CÓ ẢNH (``thumb``) mà CHƯA tải được URL ảnh: mặc định KHÔNG gửi thiếu ảnh
     mà trả ``imageNotReady`` để phía trên CHỜ và thử lại (đợi tới khi có URL ảnh).
     Chỉ khi ``force_text=True`` (đã chờ quá lâu) mới gửi phần text, bỏ ảnh.
+
+    ``quote`` (tùy chọn): thông tin tin ĐÍCH cần TRẢ LỜI để nhóm đích phản hồi đúng
+    tin tương ứng — {owner, msgId, cliMsgId, type, ts, text}.
+    Trả thêm ``sentMsgId`` + ``sentCliMsgId`` của tin vừa gửi (để map dựng quote sau).
     """
     data = {
         # Nexus tự tra cookies/zpwEnk/imei theo profileId.
@@ -271,6 +278,13 @@ def _send_to_dest(settings: dict, dest_group_id: str, text: str, thumb: str,
         "group_id": dest_group_id,
         "message": text,
     }
+    if quote and quote.get("msgId") and quote.get("cliMsgId"):
+        data["qmsgOwner"] = str(quote.get("owner") or "")
+        data["qmsgId"] = str(quote.get("msgId"))
+        data["qmsgCliId"] = str(quote.get("cliMsgId"))
+        data["qmsgType"] = str(quote.get("type") or "webchat")
+        data["qmsgTs"] = str(quote.get("ts") or "")
+        data["qmsg"] = str(quote.get("text") or "")
     files = None
     with_photo = False
     if thumb:
@@ -292,7 +306,9 @@ def _send_to_dest(settings: dict, dest_group_id: str, text: str, thumb: str,
     if not payload.get("success"):
         return {"ok": False, "withPhoto": with_photo,
                 "message": str(payload.get("error") or "Nexus báo gửi thất bại.")}
-    return {"ok": True, "withPhoto": with_photo}
+    return {"ok": True, "withPhoto": with_photo,
+            "sentMsgId": str(payload.get("sentMsgId") or ""),
+            "sentCliMsgId": str(payload.get("sentCliMsgId") or "")}
 
 
 def _send_delay(settings: dict) -> int:
@@ -361,16 +377,25 @@ def _link_entries(conversions: list) -> list:
 
 
 def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict,
-                     force_text: bool = False) -> dict:
+                     force_text: bool = False, fmap: dict = None) -> dict:
     """Chuyển link trong 1 tin rồi gửi vào từng nhóm đích trong ``dest_ids``.
 
     Trả dict gồm: entries (log), sent_dests, failed_dests (các nhóm chưa gửi
     được -> cần thử lại), converted_ok (có chuyển được link nào không), no_link,
     image_pending (có nhóm đích chưa gửi được vì ẢNH chưa sẵn sàng -> nên CHỜ).
     ``force_text=True`` -> gửi phần text dù ảnh chưa tải được (fallback sau khi chờ).
+
+    ``fmap`` = bản đồ ``msgId nguồn -> {destGroupId: {msgId, cliMsgId}}`` của các tin
+    ĐÃ chuyển tiếp. Nếu tin nguồn là TRẢ LỜI (``msg['quote']``) một tin đã map thì gửi
+    kèm quote để nhóm đích phản hồi đúng tin tương ứng; sau khi gửi, ghi map cho tin này.
     """
     raw_text, new_text, conversions, ok_count, links = _convert_message_text(settings, msg)
     has_photo = bool(str(msg.get("thumb") or "").strip())
+    # Tin nguồn TRẢ LỜI tin nào (globalMsgId = msgId của tin gốc trong group-since).
+    src_quote = msg.get("quote") if isinstance(msg.get("quote"), dict) else None
+    quoted_src_id = str((src_quote or {}).get("globalMsgId") or "").strip()
+    owner_uid = str(settings.get("profile_id") or settings.get("account_id") or "").strip()
+    src_msg_id = str(msg.get("msgId") or "").strip()
     # no_link chỉ đúng khi tin KHÔNG có link VÀ KHÔNG có ảnh -> mới bỏ qua. Tin chỉ
     # có ẢNH (người đăng tách ảnh riêng khỏi tin link) vẫn phải được chuyển tiếp.
     out = {"entries": [], "sent_dests": [], "failed_dests": [],
@@ -394,11 +419,29 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict,
     for i, dest in enumerate(dest_ids):
         if i > 0 and delay:
             time.sleep(delay)  # giãn giữa các nhóm đích, tránh gửi dồn dập
+        # Nếu tin nguồn trả lời 1 tin đã chuyển tiếp vào nhóm đích này -> gửi kèm quote.
+        quote = None
+        if quoted_src_id and isinstance(fmap, dict):
+            ref = (fmap.get(quoted_src_id) or {}).get(dest)
+            if ref and ref.get("msgId") and ref.get("cliMsgId"):
+                quote = {"owner": owner_uid, "msgId": ref["msgId"], "cliMsgId": ref["cliMsgId"],
+                         "type": ref.get("type") or "webchat", "ts": "",
+                         "text": str((src_quote or {}).get("text") or "")}
         sent = _send_to_dest(settings, dest, new_text, str(msg.get("thumb") or ""),
-                             force_text=force_text)
+                             force_text=force_text, quote=quote)
         entry = dict(base)
         entry["destGroupId"] = dest
+        if quote:
+            entry["repliedTo"] = quoted_src_id
         if sent.get("ok"):
+            # Ghi map để tin sau trả lời đúng tin này ở nhóm đích.
+            if isinstance(fmap, dict) and src_msg_id and sent.get("sentMsgId"):
+                fmap.setdefault(src_msg_id, {})[dest] = {
+                    "msgId": str(sent.get("sentMsgId")),
+                    "cliMsgId": str(sent.get("sentCliMsgId") or ""),
+                    # Loại tin đích để dựng đúng quote: có text -> webchat, chỉ ảnh -> photo.
+                    "type": "webchat" if new_text.strip() else "chat.photo",
+                }
             # links rỗng (tin chỉ có ảnh) hoặc đổi được hết -> "sent"; đổi được 1 phần
             # -> "sent_partial"; CÓ link mà không đổi được cái nào -> "sent_raw"
             # (gửi nguyên link gốc, chưa gắn subId) để nhật ký nêu rõ.
@@ -474,6 +517,9 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
         db = _load_db()
         settings = dict(db["settings"])
         last_by_group = dict(db["state"]["lastMsgByGroup"])
+        # Bản đồ msgId nguồn -> {destGroupId: {msgId, cliMsgId}} để dựng lại quote
+        # (nhóm đích trả lời đúng tin tương ứng đã chuyển tiếp).
+        forward_map = dict(db["state"].get("forwardMap") or {})
 
     def _finish(ok: bool, message: str, **extra) -> dict:
         with _lock:
@@ -560,7 +606,7 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
                 # gửi luôn phần text nếu ảnh chưa sẵn sàng, tránh mất tin.
                 res = _forward_message(settings, gid,
                                        [r["dest_group_id"] for r in routes_by_source[gid]], it,
-                                       force_text=True)
+                                       force_text=True, fmap=forward_map)
                 if res["no_link"]:
                     continue
                 with _lock:
@@ -603,7 +649,8 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
             # Tin CÓ ẢNH: đã chờ đủ _IMG_MAX_RETRY lượt mà vẫn chưa có URL ảnh -> lượt
             # này gửi TEXT (bỏ ảnh) để không mất tin; còn lại thì vẫn CHỜ ảnh.
             force_text = img_wait and (prev_attempts + 1 >= _IMG_MAX_RETRY)
-            res = _forward_message(settings, gid, dest_ids, it, force_text=force_text)
+            res = _forward_message(settings, gid, dest_ids, it, force_text=force_text,
+                                   fmap=forward_map)
             if res["no_link"]:
                 mark_msg, mark_ts = mid, mts
                 if stuck.get("msgId") == mid:
@@ -664,9 +711,15 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
             new_mark["stuck"] = stuck
         last_by_group[gid] = new_mark
 
+    # Giới hạn kích thước bản đồ quote (giữ các msgId mới nhất theo thứ tự chèn).
+    if len(forward_map) > _FORWARD_MAP_MAX:
+        for k in list(forward_map.keys())[:len(forward_map) - _FORWARD_MAP_MAX]:
+            forward_map.pop(k, None)
+
     with _lock:
         d = _load_db()
         d["state"]["lastMsgByGroup"] = last_by_group
+        d["state"]["forwardMap"] = forward_map
         d["state"].pop("retryQueue", None)  # cơ chế hàng đợi cũ — không dùng nữa
         _save_db(d)
 
