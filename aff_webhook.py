@@ -391,17 +391,21 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict,
     """
     raw_text, new_text, conversions, ok_count, links = _convert_message_text(settings, msg)
     has_photo = bool(str(msg.get("thumb") or "").strip())
+    has_text = bool((raw_text or "").strip())
+    msg_type = str(msg.get("msgType") or "")
     # Tin nguồn TRẢ LỜI tin nào (globalMsgId = msgId của tin gốc trong group-since).
     src_quote = msg.get("quote") if isinstance(msg.get("quote"), dict) else None
     quoted_src_id = str((src_quote or {}).get("globalMsgId") or "").strip()
     owner_uid = str(settings.get("profile_id") or settings.get("account_id") or "").strip()
     src_msg_id = str(msg.get("msgId") or "").strip()
-    # no_link chỉ đúng khi tin KHÔNG có link VÀ KHÔNG có ảnh -> mới bỏ qua. Tin chỉ
-    # có ẢNH (người đăng tách ảnh riêng khỏi tin link) vẫn phải được chuyển tiếp.
+    # Chuyển tiếp MỌI tin có nội dung: chữ / ảnh / link (không nhất thiết phải có link).
+    # Chỉ bỏ qua tin RỖNG hoàn toàn hoặc tin hệ thống (thu hồi/xóa) — không có giá trị.
+    is_system_noise = msg_type in ("chat.undo", "chat.delete")
+    nothing_to_forward = (not links and not has_photo and not has_text) or is_system_noise
     out = {"entries": [], "sent_dests": [], "failed_dests": [],
-           "converted_ok": ok_count > 0, "no_link": (not links and not has_photo),
+           "converted_ok": ok_count > 0, "no_link": nothing_to_forward,
            "image_pending": False}
-    if not links and not has_photo:
+    if nothing_to_forward:
         return out
     base = {
         "groupId": gid, "groupName": gid,
