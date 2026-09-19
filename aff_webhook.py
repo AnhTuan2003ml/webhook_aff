@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import requests
@@ -96,6 +97,9 @@ def _default_settings() -> dict:
         "interval_seconds": 60,
         # Độ trễ giữa các lần gửi tin (giây) — tránh gửi dồn dập bị Zalo chặn.
         "send_delay_seconds": 3,
+        # Số nhóm nguồn xử lý ĐỒNG THỜI (song song). 1 = tuần tự như trước.
+        # Tăng để nhiều luồng chạy cùng lúc; quá cao dễ bị Zalo giới hạn gửi.
+        "parallel_workers": 3,
         "shopee_aff_id": DEFAULT_SHOPEE_AFF_ID,
         # Shopee Affiliate Open API (generateShortLink) — CÁCH DUY NHẤT Shopee thống
         # kê SubID. Thiếu 2 trường này thì fallback link an_redir (không đối soát SubID).
@@ -440,12 +444,13 @@ def _forward_message(settings: dict, gid: str, dest_ids: list, msg: dict,
         if sent.get("ok"):
             # Ghi map để tin sau trả lời đúng tin này ở nhóm đích.
             if isinstance(fmap, dict) and src_msg_id and sent.get("sentMsgId"):
-                fmap.setdefault(src_msg_id, {})[dest] = {
-                    "msgId": str(sent.get("sentMsgId")),
-                    "cliMsgId": str(sent.get("sentCliMsgId") or ""),
-                    # Loại tin đích để dựng đúng quote: có text -> webchat, chỉ ảnh -> photo.
-                    "type": "webchat" if new_text.strip() else "chat.photo",
-                }
+                with _lock:  # an toàn khi nhiều luồng chạy song song
+                    fmap.setdefault(src_msg_id, {})[dest] = {
+                        "msgId": str(sent.get("sentMsgId")),
+                        "cliMsgId": str(sent.get("sentCliMsgId") or ""),
+                        # Loại tin đích để dựng đúng quote: có text -> webchat, chỉ ảnh -> photo.
+                        "type": "webchat" if new_text.strip() else "chat.photo",
+                    }
             # links rỗng (tin chỉ có ảnh) hoặc đổi được hết -> "sent"; đổi được 1 phần
             # -> "sent_partial"; CÓ link mà không đổi được cái nào -> "sent_raw"
             # (gửi nguyên link gốc, chưa gắn subId) để nhật ký nêu rõ.
@@ -578,10 +583,11 @@ def _scan_source_group(settings: dict, gid: str, group_routes: list,
     if is_baseline:
         # Nhóm MỚI (chưa có mốc): chỉ chuyển tin RẤT MỚI (trong _BASELINE_RECENT_MS),
         # bỏ lịch sử cũ; ghi mốc = tin mới nhất, các lần sau lấy tiếp từ đó.
-        last_by_group[gid] = {
-            "msgId": latest_seen,
-            "ts": int(items[-1].get("createTime") or 0) if items else int(prev.get("ts") or 0),
-        }
+        with _lock:  # an toàn khi nhiều luồng chạy song song
+            last_by_group[gid] = {
+                "msgId": latest_seen,
+                "ts": int(items[-1].get("createTime") or 0) if items else int(prev.get("ts") or 0),
+            }
         recent_cutoff = int(time.time() * 1000) - _BASELINE_RECENT_MS
         new_items = [it for it in items if int(it.get("createTime") or 0) >= recent_cutoff]
         if not new_items:
@@ -680,7 +686,8 @@ def _scan_source_group(settings: dict, gid: str, group_routes: list,
     new_mark = {"msgId": mark_msg, "ts": mark_ts}
     if stuck:
         new_mark["stuck"] = stuck
-    last_by_group[gid] = new_mark
+    with _lock:  # an toàn khi nhiều luồng chạy song song
+        last_by_group[gid] = new_mark
     return stats
 
 
@@ -742,19 +749,34 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
     errors = 0
     baseline_count = 0
 
-    for gid in source_ids:
-        try:
-            st = _scan_source_group(settings, gid, routes_by_source[gid],
-                                    last_by_group, forward_map)
-        except Exception as exc:  # noqa: BLE001 — 1 nhóm lỗi không được chặn nhóm khác
-            _log_group_error(gid, f"Lỗi xử lý nhóm: {exc}")
-            st = {"checked": 0, "newMessages": 0, "forwarded": 0, "errors": 1, "baseline": 0}
+    def _handle_result(st: dict) -> None:
+        nonlocal checked, new_messages, forwarded, errors, baseline_count
         checked += st["checked"]
         new_messages += st["newMessages"]
         forwarded += st["forwarded"]
         errors += st["errors"]
         baseline_count += st["baseline"]
         _persist_state()  # lưu mốc ngay -> lỗi về sau không mất tiến độ nhóm này
+
+    def _run_group(gid: str) -> dict:
+        try:
+            return _scan_source_group(settings, gid, routes_by_source[gid],
+                                      last_by_group, forward_map)
+        except Exception as exc:  # noqa: BLE001 — 1 nhóm lỗi không chặn nhóm khác
+            _log_group_error(gid, f"Lỗi xử lý nhóm: {exc}")
+            return {"checked": 0, "newMessages": 0, "forwarded": 0, "errors": 1, "baseline": 0}
+
+    # Số nhóm nguồn xử lý đồng thời (song song). 1 = tuần tự.
+    workers = max(1, int(settings.get("parallel_workers") or 1))
+    workers = min(workers, max(1, len(source_ids)))
+    if workers <= 1:
+        for gid in source_ids:
+            _handle_result(_run_group(gid))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_run_group, gid): gid for gid in source_ids}
+            for fut in as_completed(futures):
+                _handle_result(fut.result())
 
     # Giới hạn kích thước bản đồ quote (giữ các msgId mới nhất theo thứ tự chèn).
     if len(forward_map) > _FORWARD_MAP_MAX:
@@ -767,7 +789,8 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
     stuck_groups = sum(1 for m in last_by_group.values()
                        if isinstance(m, dict) and m.get("stuck"))
     stuck_note = f" | {stuck_groups} nhóm đang chờ gửi lại tin lỗi" if stuck_groups else ""
-    message = (f"Đã kiểm tra {checked}/{len(source_ids)} nhóm nguồn của {len(routes)} luồng: "
+    par_note = f" (song song {workers})" if workers > 1 else ""
+    message = (f"Đã kiểm tra {checked}/{len(source_ids)} nhóm nguồn của {len(routes)} luồng{par_note}: "
                f"{new_messages} tin mới, chuyển tiếp {forwarded}, lỗi {errors}{baseline_note}{stuck_note}.")
     return _finish(True, message, checkedGroups=checked, newMessages=new_messages,
                    forwarded=forwarded, errors=errors)
@@ -841,6 +864,11 @@ def api_config():
                 settings["send_delay_seconds"] = max(0, int(patch["send_delay_seconds"]))
             except Exception:
                 settings["send_delay_seconds"] = 3
+        if "parallel_workers" in patch:
+            try:
+                settings["parallel_workers"] = max(1, int(patch["parallel_workers"]))
+            except Exception:
+                settings["parallel_workers"] = 1
         if "shopee_aff_id" in patch:
             settings["shopee_aff_id"] = str(patch["shopee_aff_id"] or "").strip() or DEFAULT_SHOPEE_AFF_ID
         if "shopee_app_id" in patch:

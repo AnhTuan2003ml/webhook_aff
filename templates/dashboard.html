@@ -537,6 +537,15 @@
                     </div>
                 </div>
                 <div class="field">
+                    <label class="fl">Số luồng chạy song song</label>
+                    <div class="unit-input">
+                        <input type="number" id="parallelWorkers" min="1" step="1"
+                               inputmode="numeric" placeholder="3" title="Số nhóm nguồn xử lý đồng thời. 1 = tuần tự.">
+                        <span class="unit">luồng</span>
+                    </div>
+                    <p class="hint-p">Tăng để nhiều luồng chạy cùng lúc (nhanh hơn). Quá cao dễ bị Zalo giới hạn gửi.</p>
+                </div>
+                <div class="field">
                     <label class="fl">Shopee affiliate ID</label>
                     <input type="text" id="shopeeAffId" placeholder="17340820046">
                 </div>
@@ -623,6 +632,7 @@ function fillForm() {
     const st = S.settings;
     qs('intervalSeconds').value = String(st.interval_seconds || 1);
     qs('sendDelaySeconds').value = String(st.send_delay_seconds ?? 3);
+    qs('parallelWorkers').value = String(st.parallel_workers || 1);
     qs('shopeeAffId').value = st.shopee_aff_id || '';
     qs('shopeeAppId').value = st.shopee_app_id || '';
     qs('shopeeAppSecret').value = st.shopee_app_secret || '';
@@ -666,6 +676,7 @@ function collectForm() {
         profile_id: qs('accountSelect').value,
         interval_seconds: Math.max(1, parseInt(qs('intervalSeconds').value, 10) || 1),
         send_delay_seconds: Math.max(0, parseInt(qs('sendDelaySeconds').value, 10) || 0),
+        parallel_workers: Math.max(1, parseInt(qs('parallelWorkers').value, 10) || 1),
         shopee_aff_id: qs('shopeeAffId').value.trim(),
         shopee_app_id: qs('shopeeAppId').value.trim(),
         shopee_app_secret: qs('shopeeAppSecret').value.trim(),
