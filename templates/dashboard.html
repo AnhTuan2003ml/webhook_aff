@@ -253,8 +253,21 @@
         font-size: 10px; font-weight: 800; }
     .dual-h .n.zero { background: #cbd5e1; }
     .dual-h .dual-search { flex: 1; min-width: 0; height: 32px; font-size: 12px; border-radius: 9px; }
-    #edSrcChosen .g-item:hover { background: var(--err-soft); }
-    #edSrcChosen .g-item:hover .mark { background: var(--err); border-color: var(--err); }
+
+    /* ── Danh sách nhóm đích + nguồn cho từng đích ── */
+    .dest-list { display: flex; flex-direction: column; gap: 14px; }
+    .dest-block { border: 1px solid var(--border); border-radius: 12px; background: #fbfdff; overflow: hidden; }
+    .dest-head { display: flex; align-items: center; gap: 9px; padding: 9px 11px;
+        border-bottom: 1px solid var(--border); background: var(--accent-soft); }
+    .dest-head img { width: 30px; height: 30px; border-radius: 9px; object-fit: cover;
+        background: #e2e8f0; flex-shrink: 0; }
+    .dest-head b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dest-head .src-count { font-size: 11px; font-weight: 800; color: var(--accent);
+        background: #fff; border: 1px solid #bfdbfe; border-radius: 999px; padding: 2px 9px;
+        white-space: nowrap; flex-shrink: 0; }
+    .dest-head .dest-del { margin-left: auto; }
+    .gp-list[data-chosen] .g-item:hover { background: var(--err-soft); }
+    .gp-list[data-chosen] .g-item:hover .mark { background: var(--err); border-color: var(--err); }
     .mark.act { font-size: 11px; font-weight: 800; }
     .g-item:not(.checked) .mark.act { color: var(--accent); }
     @media (max-width: 600px) {
@@ -415,13 +428,17 @@
             </div>
             <section class="card card-pad">
                 <div class="sec-title"><span class="ic">🔀</span><h2>Luồng chuyển tiếp</h2>
-                    <span class="hint">Chọn nhóm kết quả trước, rồi tick các nhóm nguồn</span></div>
-                <div class="flow-row" id="flowRow">
-                    <button type="button" class="flow-add" id="btnAddRoute">＋ Thêm luồng</button>
+                    <span class="hint">Tick một hoặc nhiều nhóm đích, rồi gán nhóm nguồn cho từng nhóm đích</span></div>
+                <div class="group-panel" style="margin-bottom:14px">
+                    <div class="gp-head">
+                        <span class="step-no">1</span><span class="t">Nhóm đích</span>
+                        <span class="c" id="edDestLabel">chưa chọn</span>
+                        <button class="btn mini" id="edDestNone">Bỏ hết</button>
+                    </div>
+                    <div class="gp-search"><input type="text" id="edDestSearch" placeholder="Tìm nhóm..." value=""></div>
+                    <div class="gp-list" id="edDestList"></div>
                 </div>
-                <div class="route-editor" id="routeEditor">
-                    <div class="editor-empty">Bấm "＋ Thêm luồng" để bắt đầu.</div>
-                </div>
+                <div class="dest-list" id="destList"></div>
             </section>
         </div>
 
@@ -569,9 +586,9 @@
 <script>
 const S = {
     settings: {}, stats: {}, accounts: [], groups: [],
-    routes: [],      // [{id, dest, sources:Set}]
-    activeRoute: -1, // index luồng đang sửa
-    qDest: '', qSrc: '',
+    routes: [],      // [{id, dest, sources:Set}] — mỗi route = 1 nhóm đích + nhiều nhóm nguồn
+    qDest: '',       // ô tìm kiếm ở danh sách nhóm đích
+    qSrcByDest: {},  // routeId -> ô tìm kiếm nhóm nguồn của nhóm đích đó
     logsAll: [], logPage: 0, logFilter: 'success',  // nhật ký: phân trang 20/trang + tab thành công/thất bại
     manualAff: '',   // link aff đã chuyển đổi ở trang Gửi thủ công (bước 1)
 };
@@ -614,8 +631,8 @@ function fillForm() {
         dest: r.dest_group_id || '',
         sources: new Set(r.source_group_ids || []),
     }));
-    if (S.activeRoute >= S.routes.length) S.activeRoute = S.routes.length - 1;
-    if (S.activeRoute < 0 && S.routes.length) S.activeRoute = 0;
+    S.qSrcByDest = {};
+    renderRoutes();
     updateModeUI();
     updateCookieState();
 }
@@ -720,11 +737,22 @@ async function loadGroups() {
         S.groups = [];
         showStatus('Không tải được danh sách nhóm: ' + err.message, 'err');
     }
+    // Chỉ giữ nhóm đích/nguồn còn tồn tại trong tài khoản đang chọn (tránh cấu hình chết).
     const validIds = new Set(S.groups.map(g => g.groupId));
-    S.routes.forEach(r => {
-        if (r.dest && !validIds.has(r.dest)) r.dest = '';
-        r.sources = new Set([...r.sources].filter(id => validIds.has(id)));
+    let dropped = 0;
+    S.routes = S.routes.filter(r => {
+        const ok = validIds.has(r.dest);
+        if (!ok) dropped += 1;
+        return ok;
     });
+    S.routes.forEach(r => {
+        const kept = [...r.sources].filter(id => validIds.has(id));
+        dropped += r.sources.size - kept.length;
+        r.sources = new Set(kept);
+    });
+    if (dropped) {
+        showStatus(`Đã bỏ ${dropped} nhóm không còn trong tài khoản đang chọn. Bấm "Lưu cấu hình" nếu muốn áp dụng.`, 'err');
+    }
     renderRoutes();
 }
 
@@ -742,144 +770,139 @@ function groupRow(g, opts) {
         </div>`;
 }
 
-// ─── Thẻ flow: [avatar các nhóm nguồn] → [nhóm kết quả] ─────────────────────
+// ─── Cấu hình luồng: NHIỀU nhóm đích, mỗi đích gán NHIỀU nhóm nguồn ─────────
 
 function renderRoutes() {
-    const row = qs('flowRow');
-    row.querySelectorAll('.flow-card').forEach(el => el.remove());
-    if (S.activeRoute >= S.routes.length) S.activeRoute = S.routes.length - 1;
-    if (S.activeRoute < 0 && S.routes.length) S.activeRoute = 0;
-
-    const addBtn = qs('btnAddRoute');
-    S.routes.forEach((r, i) => {
-        const g = findGroup(r.dest);
-        const srcs = [...r.sources].slice(0, 3).map(gid => {
-            const sg = findGroup(gid);
-            return `<img src="${esc(sg?.avatar || '')}" alt="" title="${esc(sg?.name || gid)}" onerror="this.style.visibility='hidden'">`;
-        }).join('');
-        const more = r.sources.size > 3 ? `<span class="fc-more">+${r.sources.size - 3}</span>` : '';
-        const srcHtml = r.sources.size
-            ? `<span class="fc-srcs" title="${r.sources.size} nhóm nguồn">${srcs}${more}</span>`
-            : '<span class="fc-none" title="Chưa chọn nhóm nguồn">?</span>';
-        const destHtml = g
-            ? `<span class="fc-dest"><img src="${esc(g.avatar || '')}" alt="" onerror="this.style.visibility='hidden'"><span class="fc-name">${esc(g.name)}</span></span>`
-            : '<span class="fc-dest"><span class="fc-name unset">Chưa chọn kết quả</span></span>';
-        const card = document.createElement('div');
-        card.className = 'flow-card' + (i === S.activeRoute ? ' active' : '');
-        card.dataset.idx = i;
-        card.title = (g ? g.name : 'Chưa chọn nhóm kết quả') + ' ← ' + r.sources.size + ' nhóm nguồn';
-        card.innerHTML = `${srcHtml}<span class="fc-arrow">➜</span>${destHtml}<button type="button" class="fc-del" title="Xóa luồng">✕</button>`;
-        card.addEventListener('click', (e) => {
-            if (e.target.closest('.fc-del')) {
-                S.routes.splice(i, 1);
-                if (S.activeRoute >= S.routes.length) S.activeRoute = S.routes.length - 1;
-                renderRoutes();
-                showStatus('Đã xóa luồng — bấm "Lưu cấu hình" để áp dụng.', 'info');
-                return;
-            }
-            S.activeRoute = i;
-            S.qDest = ''; S.qSrc = '';
-            renderRoutes();
-        });
-        row.insertBefore(card, addBtn);
-    });
-    renderEditor();
+    renderDestList();
+    renderDestBlocks();
 }
 
-function renderEditor() {
-    const editor = qs('routeEditor');
-    const route = S.routes[S.activeRoute];
-    if (!route) {
-        editor.innerHTML = '<div class="editor-empty">Bấm "＋ Thêm luồng" để bắt đầu.<br>Mỗi luồng gồm 1 nhóm kết quả nhận tin từ nhiều nhóm nguồn.</div>';
-        return;
-    }
+// Bước 1: tick một hoặc nhiều nhóm đích. Mỗi nhóm đích = 1 route (dest + sources).
+function renderDestList() {
+    const wrap = qs('edDestList');
+    if (!wrap) return;
     if (!S.groups.length) {
-        editor.innerHTML = '<div class="editor-empty">Chọn tài khoản có nhóm đã đồng bộ trong Nexus (mục "Nhóm Zalo") để cấu hình luồng.</div>';
+        wrap.innerHTML = '<div class="empty">Chọn tài khoản có nhóm đã đồng bộ trong Nexus (mục "Nhóm Zalo") để cấu hình.</div>';
+    } else {
+        const q = S.qDest.trim().toLowerCase();
+        const list = S.groups.filter(g => !q || g.name.toLowerCase().includes(q));
+        wrap.innerHTML = list.length ? list.map(g => {
+            const isDest = S.routes.some(r => r.dest === g.groupId);
+            const asSource = S.routes.some(r => r.dest !== g.groupId && r.sources.has(g.groupId));
+            return groupRow(g, {
+                checked: isDest,
+                disabled: false,
+                mark: 'dot-r',
+                role: asSource ? { cls: 'src', text: 'Nguồn' }
+                    : (isDest ? { cls: 'dst', text: 'Đích' } : null),
+            });
+        }).join('') : '<div class="empty">Không có nhóm khớp từ khóa.</div>';
+    }
+    const label = qs('edDestLabel');
+    if (label) label.textContent = S.routes.length ? (S.routes.length + ' nhóm đích đã chọn') : 'chưa chọn';
+    wrap.querySelectorAll('.g-item').forEach(el => el.addEventListener('click', () => {
+        const gid = el.dataset.gid;
+        const idx = S.routes.findIndex(r => r.dest === gid);
+        if (idx >= 0) {
+            delete S.qSrcByDest[S.routes[idx].id];
+            S.routes.splice(idx, 1);
+        } else {
+            S.routes.push({ id: 'r' + Date.now() + Math.random().toString(36).slice(2, 6),
+                            dest: gid, sources: new Set() });
+        }
+        renderRoutes();
+    }));
+}
+
+// Bước 2: mỗi nhóm đích 1 khối, gán nhiều nhóm nguồn bằng 2 cột.
+function renderDestBlocks() {
+    const wrap = qs('destList');
+    if (!wrap) return;
+    if (!S.routes.length) {
+        wrap.innerHTML = '<div class="editor-empty">Chưa chọn nhóm đích. Tick một hoặc nhiều nhóm ở danh sách trên.</div>';
         return;
     }
-    editor.innerHTML = `
-        <div class="group-panel">
-            <div class="gp-head">
-                <span class="step-no">1</span><span class="t">Nhóm kết quả</span>
-                <span class="c" id="edDestLabel"></span>
-            </div>
-            <div class="gp-search"><input type="text" id="edDestSearch" placeholder="Tìm nhóm..." value="${esc(S.qDest)}"></div>
-            <div class="gp-list" id="edDestList"></div>
-        </div>
-        <div class="group-panel">
-            <div class="gp-head">
-                <span class="step-no">2</span><span class="t">Nhóm nguồn</span>
-                <span class="c" id="edSrcLabel"></span>
-                <button class="btn mini" id="edSrcAll">Chọn tất cả</button>
-                <button class="btn mini" id="edSrcNone">Bỏ hết</button>
+    wrap.innerHTML = S.routes.map((r, i) => {
+        const g = findGroup(r.dest);
+        return `<div class="dest-block" data-i="${i}">
+            <div class="dest-head">
+                <img src="${esc(g?.avatar || '')}" alt="" onerror="this.style.visibility='hidden'">
+                <b>${esc(g?.name || r.dest)}</b>
+                <span class="src-count">${r.sources.size} nhóm nguồn</span>
+                <button type="button" class="btn mini dest-del" data-del="${i}" title="Bỏ nhóm đích này">✕</button>
             </div>
             <div class="dual">
                 <div class="dual-col">
-                    <div class="dual-h"><span class="lbl">Đã chọn</span><span class="n" id="edSrcChosenN">0</span></div>
-                    <div class="gp-list" id="edSrcChosen"></div>
+                    <div class="dual-h"><span class="lbl">Nguồn đã chọn</span><span class="n ${r.sources.size ? '' : 'zero'}">${r.sources.size}</span></div>
+                    <div class="gp-list" data-chosen="${i}"></div>
                 </div>
                 <div class="dual-col">
-                    <div class="dual-h"><input type="text" id="edSrcSearch" class="dual-search"
-                        placeholder="Tìm trong nhóm còn lại..." value="${esc(S.qSrc)}"></div>
-                    <div class="gp-list" id="edSrcRemain"></div>
+                    <div class="dual-h"><input type="text" class="dual-search" data-search="${i}"
+                        placeholder="Tìm trong nhóm còn lại..." value="${esc(S.qSrcByDest[r.id] || '')}"></div>
+                    <div class="gp-list" data-remain="${i}"></div>
                 </div>
             </div>
         </div>`;
-    qs('edDestSearch').addEventListener('input', (e) => { S.qDest = e.target.value; renderDestList(); });
-    qs('edSrcSearch').addEventListener('input', (e) => { S.qSrc = e.target.value; renderSrcPanel(); });
-    qs('edSrcAll').addEventListener('click', () => {
-        S.groups.forEach(g => { if (g.groupId !== route.dest) route.sources.add(g.groupId); });
-        renderSrcPanel(); renderDestList(); refreshFlowCard();
-    });
-    qs('edSrcNone').addEventListener('click', () => {
-        route.sources.clear(); renderSrcPanel(); renderDestList(); refreshFlowCard();
-    });
-    renderDestList();
-    renderSrcPanel();
-}
-
-// Vẽ lại riêng thẻ flow đang sửa (giữ nguyên editor + focus ô tìm kiếm).
-function refreshFlowCard() {
-    const cards = qs('flowRow').querySelectorAll('.flow-card');
-    const route = S.routes[S.activeRoute];
-    const card = cards[S.activeRoute];
-    if (!route || !card) return;
-    const g = findGroup(route.dest);
-    const srcs = [...route.sources].slice(0, 3).map(gid => {
-        const sg = findGroup(gid);
-        return `<img src="${esc(sg?.avatar || '')}" alt="" title="${esc(sg?.name || gid)}" onerror="this.style.visibility='hidden'">`;
     }).join('');
-    const more = route.sources.size > 3 ? `<span class="fc-more">+${route.sources.size - 3}</span>` : '';
-    const srcHtml = route.sources.size
-        ? `<span class="fc-srcs" title="${route.sources.size} nhóm nguồn">${srcs}${more}</span>`
-        : '<span class="fc-none" title="Chưa chọn nhóm nguồn">?</span>';
-    const destHtml = g
-        ? `<span class="fc-dest"><img src="${esc(g.avatar || '')}" alt="" onerror="this.style.visibility='hidden'"><span class="fc-name">${esc(g.name)}</span></span>`
-        : '<span class="fc-dest"><span class="fc-name unset">Chưa chọn kết quả</span></span>';
-    card.innerHTML = `${srcHtml}<span class="fc-arrow">➜</span>${destHtml}<button type="button" class="fc-del" title="Xóa luồng">✕</button>`;
+    S.routes.forEach((_, i) => fillDestSources(i));
+    wrap.querySelectorAll('[data-search]').forEach(inp => inp.addEventListener('input', () => {
+        const i = +inp.dataset.search;
+        const r = S.routes[i];
+        if (r) S.qSrcByDest[r.id] = inp.value;
+        fillDestSources(i);
+    }));
+    wrap.querySelectorAll('[data-del]').forEach(btn => btn.addEventListener('click', () => {
+        const i = +btn.dataset.del;
+        const r = S.routes[i];
+        if (r) delete S.qSrcByDest[r.id];
+        S.routes.splice(i, 1);
+        renderRoutes();
+    }));
 }
 
-function renderDestList() {
-    const route = S.routes[S.activeRoute];
-    const wrap = qs('edDestList');
-    if (!route || !wrap) return;
-    const q = S.qDest.trim().toLowerCase();
-    const list = S.groups.filter(g => !q || g.name.toLowerCase().includes(q));
-    wrap.innerHTML = list.length ? list.map(g => groupRow(g, {
-        checked: g.groupId === route.dest,
-        disabled: route.sources.has(g.groupId),
-        mark: 'dot-r',
-        role: route.sources.has(g.groupId) ? { cls: 'src', text: 'Nguồn' } : null,
-    })).join('') : '<div class="empty">Không có nhóm khớp từ khóa.</div>';
-    const label = qs('edDestLabel');
-    const g = findGroup(route.dest);
-    if (label) label.textContent = g ? g.name : 'chưa chọn';
-    wrap.querySelectorAll('.g-item').forEach(el => el.addEventListener('click', () => {
-        const gid = el.dataset.gid;
-        if (route.sources.has(gid)) { showStatus('Nhóm này đang là nhóm nguồn của luồng — bỏ tick bên phải trước.', 'err'); return; }
-        route.dest = (route.dest === gid) ? '' : gid;
-        renderDestList(); renderSrcPanel(); refreshFlowCard();
+// Đổ 2 cột nguồn (đã chọn / còn lại) cho nhóm đích thứ i.
+function fillDestSources(i) {
+    const r = S.routes[i];
+    if (!r) return;
+    const chosenWrap = document.querySelector(`#destList [data-chosen="${i}"]`);
+    const remainWrap = document.querySelector(`#destList [data-remain="${i}"]`);
+    if (!chosenWrap || !remainWrap) return;
+    const chosen = S.groups.filter(g => r.sources.has(g.groupId));
+    chosenWrap.innerHTML = chosen.length
+        ? chosen.map(g => srcItem(g, 'chosen')).join('')
+        : '<div class="empty">Chưa chọn nhóm nguồn.<br>Bấm nhóm ở cột bên phải để thêm.</div>';
+    const q = (S.qSrcByDest[r.id] || '').trim().toLowerCase();
+    const remain = S.groups.filter(g =>
+        g.groupId !== r.dest
+        && !r.sources.has(g.groupId)
+        && (!q || g.name.toLowerCase().includes(q)));
+    remainWrap.innerHTML = remain.length
+        ? remain.map(g => srcItem(g, 'remain')).join('')
+        : `<div class="empty">${q ? 'Không có nhóm khớp từ khóa.' : 'Đã chọn hết nhóm khả dụng.'}</div>`;
+    chosenWrap.querySelectorAll('.g-item').forEach(el => el.addEventListener('click', () => {
+        r.sources.delete(el.dataset.gid);
+        updateDestBlock(i);
     }));
+    remainWrap.querySelectorAll('.g-item').forEach(el => el.addEventListener('click', () => {
+        if (el.dataset.gid === r.dest) return;
+        r.sources.add(el.dataset.gid);
+        updateDestBlock(i);
+    }));
+}
+
+// Cập nhật nhanh 1 khối đích sau khi thêm/bớt nguồn (không vẽ lại cả trang).
+function updateDestBlock(i) {
+    const r = S.routes[i];
+    if (!r) return;
+    const block = document.querySelector(`#destList .dest-block[data-i="${i}"]`);
+    if (block) {
+        const cnt = block.querySelector('.src-count');
+        if (cnt) cnt.textContent = r.sources.size + ' nhóm nguồn';
+        const n = block.querySelector('.dual-h .n');
+        if (n) { n.textContent = r.sources.size; n.classList.toggle('zero', !r.sources.size); }
+    }
+    fillDestSources(i);
+    renderDestList();
 }
 
 // Một dòng nhóm trong cột nguồn: mode 'chosen' (đã chọn — bấm để bỏ) hoặc
@@ -893,45 +916,6 @@ function srcItem(g, mode) {
             <img src="${esc(g.avatar || '')}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">
             <span class="gname">${esc(g.name)}</span>
         </div>`;
-}
-
-// Nhóm nguồn 2 cột: TRÁI = đã chọn, PHẢI = còn lại (nhóm được chọn rời khỏi
-// cột phải sang cột trái). Ô tìm kiếm chỉ lọc cột phải (còn lại).
-function renderSrcPanel() {
-    const route = S.routes[S.activeRoute];
-    const chosenWrap = qs('edSrcChosen');
-    const remainWrap = qs('edSrcRemain');
-    if (!route || !chosenWrap || !remainWrap) return;
-
-    const chosen = S.groups.filter(g => route.sources.has(g.groupId));
-    chosenWrap.innerHTML = chosen.length
-        ? chosen.map(g => srcItem(g, 'chosen')).join('')
-        : '<div class="empty">Chưa chọn nhóm nào.<br>Bấm nhóm ở cột bên phải để thêm.</div>';
-
-    const q = S.qSrc.trim().toLowerCase();
-    const remain = S.groups.filter(g =>
-        g.groupId !== route.dest
-        && !route.sources.has(g.groupId)
-        && (!q || g.name.toLowerCase().includes(q)));
-    remainWrap.innerHTML = remain.length
-        ? remain.map(g => srcItem(g, 'remain')).join('')
-        : `<div class="empty">${q ? 'Không có nhóm khớp từ khóa.' : 'Đã chọn hết nhóm khả dụng.'}</div>`;
-
-    const label = qs('edSrcLabel');
-    if (label) label.textContent = route.sources.size + ' nhóm được chọn';
-    const n = qs('edSrcChosenN');
-    if (n) { n.textContent = route.sources.size; n.classList.toggle('zero', !route.sources.size); }
-
-    chosenWrap.querySelectorAll('.g-item').forEach(el => el.addEventListener('click', () => {
-        route.sources.delete(el.dataset.gid);
-        renderSrcPanel(); renderDestList(); refreshFlowCard();
-    }));
-    remainWrap.querySelectorAll('.g-item').forEach(el => el.addEventListener('click', () => {
-        const gid = el.dataset.gid;
-        if (gid === route.dest) return;
-        route.sources.add(gid);
-        renderSrcPanel(); renderDestList(); refreshFlowCard();
-    }));
 }
 
 // ─── Thống kê + nhật ký ──────────────────────────────────────────────────────
@@ -1233,11 +1217,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     qs('enabledToggle').addEventListener('change', toggleEnabled);
     qs('accountSelect').addEventListener('change', loadGroups);
     qs('btnReloadNexus').addEventListener('click', loadAccounts);
-    qs('btnAddRoute').addEventListener('click', () => {
-        S.routes.push({ id: 'r' + Date.now(), dest: '', sources: new Set() });
-        S.activeRoute = S.routes.length - 1;
-        S.qDest = ''; S.qSrc = '';
+    qs('edDestSearch').addEventListener('input', (e) => { S.qDest = e.target.value; renderDestList(); });
+    qs('edDestNone').addEventListener('click', () => {
+        S.routes = []; S.qSrcByDest = {};
         renderRoutes();
+        showStatus('Đã bỏ hết nhóm đích — bấm "Lưu cấu hình" để áp dụng.', 'info');
     });
     qs('btnCookieEdit').addEventListener('click', () => {
         const ta = qs('lazadaCookie');

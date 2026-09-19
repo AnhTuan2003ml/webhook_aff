@@ -515,8 +515,182 @@ def _force_forward_message(settings: dict, gid: str, dest_ids: list, msg: dict) 
     return out
 
 
+def _log_forward_result(res: dict) -> None:
+    """Ghi nhật ký + thống kê cho 1 lần chuyển tiếp 1 tin (nhiều nhóm đích)."""
+    with _lock:
+        d = _load_db()
+        for entry in res["entries"]:
+            _append_log(d, entry)
+            if entry["status"].startswith("sent"):
+                d["stats"]["forwarded"] = int(d["stats"]["forwarded"]) + 1
+            elif entry["status"] != "waiting_image":
+                d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
+        _save_db(d)
+
+
+def _log_group_error(gid: str, message: str) -> None:
+    """Ghi nhật ký 1 lỗi ở mức NHÓM NGUỒN (không chặn các nhóm khác)."""
+    with _lock:
+        d = _load_db()
+        _append_log(d, {"groupId": gid, "groupName": gid, "status": "error",
+                        "error": str(message), "links": [], "textPreview": ""})
+        d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
+        _save_db(d)
+
+
+def _scan_source_group(settings: dict, gid: str, group_routes: list,
+                       last_by_group: dict, forward_map: dict) -> dict:
+    """Quét 1 NHÓM NGUỒN: chuyển link tin mới rồi gửi tới các nhóm đích của nhóm đó.
+
+    Cập nhật ``last_by_group[gid]`` (mốc msgId) và ``forward_map`` (quote).
+    Trả thống kê riêng nhóm này: {"checked","newMessages","forwarded","errors","baseline"}.
+    Mọi lỗi được ghi log và trả về — KHÔNG raise ra ngoài để không chặn nhóm khác.
+    """
+    prev = last_by_group.get(gid) or {}
+    since_id = str(prev.get("msgId") or "0") or "0"
+    is_baseline = since_id in ("", "0")
+    acc_ref = str(settings.get("profile_id") or settings.get("account_id") or "").strip()
+    stats = {"checked": 0, "newMessages": 0, "forwarded": 0, "errors": 0, "baseline": 0}
+
+    try:
+        # Lấy TẤT CẢ tin có msgId > mốc (Nexus dùng getrecentv2, phân trang lùi
+        # tới mốc) -> không bỏ sót khi có nhiều tin giữa 2 lần quét.
+        payload = nexus_get("/api/messages/group-since",
+                            {"groupId": gid, "profileId": acc_ref,
+                             "sinceMsgId": since_id})
+    except NexusError as exc:
+        _log_group_error(gid, str(exc))
+        stats["errors"] += 1
+        return stats
+    stats["checked"] = 1
+    if not payload.get("success"):
+        _log_group_error(gid, str(payload.get("error") or "group-since lỗi"))
+        stats["errors"] += 1
+        return stats
+
+    # items: đã sắp CŨ -> MỚI, chỉ gồm tin có msgId > mốc (Nexus lọc sẵn).
+    items = payload.get("items") or []
+    latest_seen = str(payload.get("latestMsgId") or since_id or "0")
+    # stuck: tin đang bị kẹt (gửi lỗi) của nhóm này, kèm số lần đã thử.
+    stuck = dict(prev.get("stuck") or {})
+    all_dests = [r["dest_group_id"] for r in group_routes]
+
+    if is_baseline:
+        # Nhóm MỚI (chưa có mốc): chỉ chuyển tin RẤT MỚI (trong _BASELINE_RECENT_MS),
+        # bỏ lịch sử cũ; ghi mốc = tin mới nhất, các lần sau lấy tiếp từ đó.
+        last_by_group[gid] = {
+            "msgId": latest_seen,
+            "ts": int(items[-1].get("createTime") or 0) if items else int(prev.get("ts") or 0),
+        }
+        recent_cutoff = int(time.time() * 1000) - _BASELINE_RECENT_MS
+        new_items = [it for it in items if int(it.get("createTime") or 0) >= recent_cutoff]
+        if not new_items:
+            stats["baseline"] = 1
+            return stats
+        for it in new_items:
+            stats["newMessages"] += 1
+            if _is_own_forwarded(it, settings):
+                continue
+            # Baseline chỉ chạy 1 lần (mốc đã tiến) nên không chờ lại được ảnh:
+            # gửi luôn phần text nếu ảnh chưa sẵn sàng, tránh mất tin.
+            res = _forward_message(settings, gid, all_dests, it,
+                                   force_text=True, fmap=forward_map)
+            if res["no_link"]:
+                continue
+            _log_forward_result(res)
+            stats["forwarded"] += len(res["sent_dests"])
+            stats["errors"] += len(res["failed_dests"])
+            time.sleep(_send_delay(settings))
+        return stats
+
+    # KHÔNG baseline: xử lý CŨ->MỚI, MỐC CHỈ TIẾN QUA TIN ĐÃ XONG. Gặp tin lỗi
+    # thì DỪNG (mốc giữ ở tin thành công trước đó) để lượt sau tiếp tục ĐÚNG từ
+    # tin lỗi, KHÔNG nhảy lên tin mới nhất -> không bỏ sót tin ở giữa.
+    mark_msg = since_id
+    mark_ts = int(prev.get("ts") or 0)
+    for it in items:
+        mid = str(it.get("msgId") or "")
+        mts = int(it.get("createTime") or 0)
+        stats["newMessages"] += 1
+        # Bỏ qua tin do CHÍNH webhook đã chuyển (đã gắn subId của mình) để tránh
+        # lặp vô hạn khi một nhóm vừa là nguồn vừa là đích. Tin thường — kể cả do
+        # chính tài khoản tự gõ — vẫn được chuyển tiếp bình thường.
+        if _is_own_forwarded(it, settings):
+            mark_msg, mark_ts = mid, mts
+            if stuck.get("msgId") == mid:
+                stuck = {}
+            continue
+        # Nếu là tin đang kẹt -> chỉ gửi các nhóm đích CÒN THIẾU (tránh gửi trùng).
+        is_stuck_here = stuck.get("msgId") == mid
+        dest_ids = (stuck.get("pendingDests") or all_dests) if is_stuck_here else all_dests
+        prev_attempts = int(stuck.get("attempts") or 0) if is_stuck_here else 0
+        img_wait = bool(stuck.get("imageWait")) if is_stuck_here else False
+        # Tin CÓ ẢNH: đã chờ đủ _IMG_MAX_RETRY lượt mà vẫn chưa có URL ảnh -> lượt
+        # này gửi TEXT (bỏ ảnh) để không mất tin; còn lại thì vẫn CHỜ ảnh.
+        force_text = img_wait and (prev_attempts + 1 >= _IMG_MAX_RETRY)
+        res = _forward_message(settings, gid, dest_ids, it, force_text=force_text,
+                               fmap=forward_map)
+        if res["no_link"]:
+            mark_msg, mark_ts = mid, mts
+            if stuck.get("msgId") == mid:
+                stuck = {}
+            continue
+        _log_forward_result(res)
+        stats["forwarded"] += len(res["sent_dests"])
+
+        if not res["failed_dests"]:
+            # Gửi thành công hết (kể cả tin chỉ có ảnh) -> mốc tiến qua tin này.
+            mark_msg, mark_ts = mid, mts
+            if stuck.get("msgId") == mid:
+                stuck = {}
+            time.sleep(_send_delay(settings))
+            continue
+
+        # Tin CHƯA XONG. Phân biệt: (a) CHỜ ẢNH (URL chưa sẵn sàng) -> chờ lâu
+        # hơn, KHÔNG tính là lỗi; (b) lỗi thật (gửi fail / không chuyển được link).
+        image_wait = img_wait or bool(res.get("image_pending"))
+        if not image_wait:
+            stats["errors"] += len(res["failed_dests"])
+        budget = _IMG_MAX_RETRY if image_wait else _MAX_RETRY
+        attempts = prev_attempts + 1
+        if attempts >= budget:
+            # Quá hạn: với tin ảnh, lượt này đã force_text (gửi text bỏ ảnh) — nếu
+            # vẫn tới đây nghĩa là ngay text cũng lỗi -> bỏ qua để không nghẽn.
+            reason = ("Đã chờ ảnh quá lâu vẫn chưa có URL -> bỏ qua." if image_wait
+                      else f"Đã bỏ qua sau {attempts} lần thử (không gửi được).")
+            with _lock:
+                d = _load_db()
+                _append_log(d, {
+                    "groupId": gid, "groupName": gid, "status": "error",
+                    "error": reason,
+                    "links": [], "textPreview": str(it.get("title") or "")[:220],
+                    "msgId": mid, "skipped": True,
+                })
+                _save_db(d)
+            mark_msg, mark_ts = mid, mts
+            stuck = {}
+            time.sleep(_send_delay(settings))
+            continue
+        # Chưa tới ngưỡng -> DỪNG tại đây; lượt sau bắt đầu lại đúng từ tin này
+        # (nếu chờ ảnh: đợi tới khi CDN có URL ảnh rồi mới gửi kèm ảnh).
+        stuck = {"msgId": mid, "attempts": attempts,
+                 "pendingDests": res["failed_dests"], "imageWait": image_wait}
+        break
+
+    new_mark = {"msgId": mark_msg, "ts": mark_ts}
+    if stuck:
+        new_mark["stuck"] = stuck
+    last_by_group[gid] = new_mark
+    return stats
+
+
 def run_forward_once(triggered_by: str = "worker") -> dict:
-    """Kiểm tra mọi nhóm nguồn 1 lượt, chuyển link và gửi vào nhóm kết quả."""
+    """Kiểm tra mọi nhóm nguồn 1 lượt, chuyển link và gửi vào nhóm kết quả.
+
+    Mỗi nhóm nguồn xử lý ĐỘC LẬP: lỗi ở 1 nhóm không làm dừng các nhóm khác, và
+    mốc msgId được lưu ngay sau mỗi nhóm nên không mất tiến độ khi có lỗi.
+    Một nhóm nguồn thuộc nhiều luồng -> quét 1 lần, gửi cho từng nhóm đích.
+    """
     with _lock:
         db = _load_db()
         settings = dict(db["settings"])
@@ -525,7 +699,16 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
         # (nhóm đích trả lời đúng tin tương ứng đã chuyển tiếp).
         forward_map = dict(db["state"].get("forwardMap") or {})
 
+    def _persist_state() -> None:
+        with _lock:
+            d = _load_db()
+            d["state"]["lastMsgByGroup"] = last_by_group
+            d["state"]["forwardMap"] = forward_map
+            d["state"].pop("retryQueue", None)  # cơ chế hàng đợi cũ — không dùng nữa
+            _save_db(d)
+
     def _finish(ok: bool, message: str, **extra) -> dict:
+        _persist_state()
         with _lock:
             d = _load_db()
             d["stats"]["lastRunAt"] = _now_str()
@@ -560,172 +743,25 @@ def run_forward_once(triggered_by: str = "worker") -> dict:
     baseline_count = 0
 
     for gid in source_ids:
-        # MỐC đã lưu (msgId). Lần đầu = "0" -> baseline (chỉ tin rất mới).
-        prev = last_by_group.get(gid) or {}
-        since_id = str(prev.get("msgId") or "0") or "0"
-        is_baseline = since_id in ("", "0")
         try:
-            # Lấy TẤT CẢ tin có msgId > mốc (Nexus dùng getrecentv2, phân trang lùi
-            # tới mốc) -> không bỏ sót khi có nhiều tin giữa 2 lần quét.
-            payload = nexus_get("/api/messages/group-since",
-                                {"groupId": gid, "profileId": acc_ref,
-                                 "sinceMsgId": since_id})
-        except NexusError as exc:
-            return _finish(False, str(exc), checkedGroups=checked)
-        checked += 1
-        if not payload.get("success"):
-            errors += 1
-            with _lock:
-                d = _load_db()
-                _append_log(d, {"groupId": gid, "groupName": gid, "status": "error",
-                                "error": str(payload.get("error") or "group-since lỗi"),
-                                "links": [], "textPreview": ""})
-                d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
-                _save_db(d)
-            continue
-
-        # items: đã sắp CŨ -> MỚI, chỉ gồm tin có msgId > mốc (Nexus lọc sẵn).
-        items = payload.get("items") or []
-        latest_seen = str(payload.get("latestMsgId") or since_id or "0")
-        # stuck: tin đang bị kẹt (gửi lỗi) của nhóm này, kèm số lần đã thử.
-        stuck = dict(prev.get("stuck") or {})
-
-        if is_baseline:
-            # Nhóm MỚI (chưa có mốc): chỉ chuyển tin RẤT MỚI (trong _BASELINE_RECENT_MS),
-            # bỏ lịch sử cũ; ghi mốc = tin mới nhất, các lần sau lấy tiếp từ đó.
-            last_by_group[gid] = {
-                "msgId": latest_seen,
-                "ts": int(items[-1].get("createTime") or 0) if items else int(prev.get("ts") or 0),
-            }
-            recent_cutoff = int(time.time() * 1000) - _BASELINE_RECENT_MS
-            new_items = [it for it in items if int(it.get("createTime") or 0) >= recent_cutoff]
-            if not new_items:
-                baseline_count += 1
-                continue
-            for it in new_items:
-                new_messages += 1
-                if _is_own_forwarded(it, settings):
-                    continue
-                # Baseline chỉ chạy 1 lần (mốc đã tiến) nên không chờ lại được ảnh:
-                # gửi luôn phần text nếu ảnh chưa sẵn sàng, tránh mất tin.
-                res = _forward_message(settings, gid,
-                                       [r["dest_group_id"] for r in routes_by_source[gid]], it,
-                                       force_text=True, fmap=forward_map)
-                if res["no_link"]:
-                    continue
-                with _lock:
-                    d = _load_db()
-                    for entry in res["entries"]:
-                        _append_log(d, entry)
-                        if entry["status"].startswith("sent"):
-                            d["stats"]["forwarded"] = int(d["stats"]["forwarded"]) + 1
-                        elif entry["status"] != "waiting_image":
-                            d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
-                    _save_db(d)
-                forwarded += len(res["sent_dests"])
-                errors += len(res["failed_dests"])
-                time.sleep(_send_delay(settings))
-            continue
-
-        # KHÔNG baseline: xử lý CŨ->MỚI, MỐC CHỈ TIẾN QUA TIN ĐÃ XONG. Gặp tin lỗi
-        # thì DỪNG (mốc giữ ở tin thành công trước đó) để lượt sau tiếp tục ĐÚNG từ
-        # tin lỗi, KHÔNG nhảy lên tin mới nhất -> không bỏ sót tin ở giữa.
-        mark_msg = since_id
-        mark_ts = int(prev.get("ts") or 0)
-        for it in items:
-            mid = str(it.get("msgId") or "")
-            mts = int(it.get("createTime") or 0)
-            new_messages += 1
-            all_dests = [r["dest_group_id"] for r in routes_by_source[gid]]
-            # Bỏ qua tin do CHÍNH webhook đã chuyển (đã gắn subId của mình) để tránh
-            # lặp vô hạn khi một nhóm vừa là nguồn vừa là đích. Tin thường — kể cả do
-            # chính tài khoản tự gõ — vẫn được chuyển tiếp bình thường.
-            if _is_own_forwarded(it, settings):
-                mark_msg, mark_ts = mid, mts
-                if stuck.get("msgId") == mid:
-                    stuck = {}
-                continue
-            # Nếu là tin đang kẹt -> chỉ gửi các nhóm đích CÒN THIẾU (tránh gửi trùng).
-            is_stuck_here = stuck.get("msgId") == mid
-            dest_ids = (stuck.get("pendingDests") or all_dests) if is_stuck_here else all_dests
-            prev_attempts = int(stuck.get("attempts") or 0) if is_stuck_here else 0
-            img_wait = bool(stuck.get("imageWait")) if is_stuck_here else False
-            # Tin CÓ ẢNH: đã chờ đủ _IMG_MAX_RETRY lượt mà vẫn chưa có URL ảnh -> lượt
-            # này gửi TEXT (bỏ ảnh) để không mất tin; còn lại thì vẫn CHỜ ảnh.
-            force_text = img_wait and (prev_attempts + 1 >= _IMG_MAX_RETRY)
-            res = _forward_message(settings, gid, dest_ids, it, force_text=force_text,
-                                   fmap=forward_map)
-            if res["no_link"]:
-                mark_msg, mark_ts = mid, mts
-                if stuck.get("msgId") == mid:
-                    stuck = {}
-                continue
-            with _lock:
-                d = _load_db()
-                for entry in res["entries"]:
-                    _append_log(d, entry)
-                    if entry["status"].startswith("sent"):
-                        d["stats"]["forwarded"] = int(d["stats"]["forwarded"]) + 1
-                    elif entry["status"] != "waiting_image":
-                        d["stats"]["errors"] = int(d["stats"]["errors"]) + 1
-                _save_db(d)
-            forwarded += len(res["sent_dests"])
-
-            if not res["failed_dests"]:
-                # Gửi thành công hết (kể cả tin chỉ có ảnh) -> mốc tiến qua tin này.
-                mark_msg, mark_ts = mid, mts
-                if stuck.get("msgId") == mid:
-                    stuck = {}
-                time.sleep(_send_delay(settings))
-                continue
-
-            # Tin CHƯA XONG. Phân biệt: (a) CHỜ ẢNH (URL chưa sẵn sàng) -> chờ lâu
-            # hơn, KHÔNG tính là lỗi; (b) lỗi thật (gửi fail / không chuyển được link).
-            image_wait = img_wait or bool(res.get("image_pending"))
-            if not image_wait:
-                errors += len(res["failed_dests"])
-            budget = _IMG_MAX_RETRY if image_wait else _MAX_RETRY
-            attempts = prev_attempts + 1
-            if attempts >= budget:
-                # Quá hạn: với tin ảnh, lượt này đã force_text (gửi text bỏ ảnh) — nếu
-                # vẫn tới đây nghĩa là ngay text cũng lỗi -> bỏ qua để không nghẽn.
-                reason = ("Đã chờ ảnh quá lâu vẫn chưa có URL -> bỏ qua." if image_wait
-                          else f"Đã bỏ qua sau {attempts} lần thử (không gửi được).")
-                with _lock:
-                    d = _load_db()
-                    _append_log(d, {
-                        "groupId": gid, "groupName": gid, "status": "error",
-                        "error": reason,
-                        "links": [], "textPreview": str(it.get("title") or "")[:220],
-                        "msgId": mid, "skipped": True,
-                    })
-                    _save_db(d)
-                mark_msg, mark_ts = mid, mts
-                stuck = {}
-                time.sleep(_send_delay(settings))
-                continue
-            # Chưa tới ngưỡng -> DỪNG tại đây; lượt sau bắt đầu lại đúng từ tin này
-            # (nếu chờ ảnh: đợi tới khi CDN có URL ảnh rồi mới gửi kèm ảnh).
-            stuck = {"msgId": mid, "attempts": attempts,
-                     "pendingDests": res["failed_dests"], "imageWait": image_wait}
-            break
-
-        new_mark = {"msgId": mark_msg, "ts": mark_ts}
-        if stuck:
-            new_mark["stuck"] = stuck
-        last_by_group[gid] = new_mark
+            st = _scan_source_group(settings, gid, routes_by_source[gid],
+                                    last_by_group, forward_map)
+        except Exception as exc:  # noqa: BLE001 — 1 nhóm lỗi không được chặn nhóm khác
+            _log_group_error(gid, f"Lỗi xử lý nhóm: {exc}")
+            st = {"checked": 0, "newMessages": 0, "forwarded": 0, "errors": 1, "baseline": 0}
+        checked += st["checked"]
+        new_messages += st["newMessages"]
+        forwarded += st["forwarded"]
+        errors += st["errors"]
+        baseline_count += st["baseline"]
+        _persist_state()  # lưu mốc ngay -> lỗi về sau không mất tiến độ nhóm này
 
     # Giới hạn kích thước bản đồ quote (giữ các msgId mới nhất theo thứ tự chèn).
     if len(forward_map) > _FORWARD_MAP_MAX:
         for k in list(forward_map.keys())[:len(forward_map) - _FORWARD_MAP_MAX]:
             forward_map.pop(k, None)
 
-    with _lock:
-        d = _load_db()
-        d["state"]["lastMsgByGroup"] = last_by_group
-        d["state"]["forwardMap"] = forward_map
-        d["state"].pop("retryQueue", None)  # cơ chế hàng đợi cũ — không dùng nữa
-        _save_db(d)
+    _persist_state()
 
     baseline_note = f", {baseline_count} nhóm ghi mốc lần đầu" if baseline_count else ""
     stuck_groups = sum(1 for m in last_by_group.values()
