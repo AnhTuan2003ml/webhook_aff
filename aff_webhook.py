@@ -1,7 +1,7 @@
 """Aff Forwarder Webhook — extension ĐỘC LẬP, không đụng vào code Nexus.
 
 Chạy thành server riêng (mặc định http://127.0.0.1:5001), dùng Nexus.exe làm
-server API (mặc định http://127.0.0.1:5000):
+server API (mặc định http://127.0.0.1:5137):
 
 - ``GET  /api/accounts``                → danh sách tài khoản Zalo.
 - ``GET  /api/groups/personal``         → danh sách nhóm của tài khoản.
@@ -44,8 +44,9 @@ from link_converter import (  # noqa: E402
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "aff_webhook.json")
 
-# Địa chỉ Nexus fix cứng (đổi được qua biến môi trường NEXUS_URL nếu cần).
-NEXUS_URL = os.environ.get("NEXUS_URL", "http://127.0.0.1:5000").rstrip("/")
+# Địa chỉ Nexus (đổi được qua biến môi trường NEXUS_URL nếu cần). Mặc định trùng
+# cổng UI mới của Nexus (5137) — Nexus đã chuyển khỏi 5000 để tránh đụng port.
+NEXUS_URL = os.environ.get("NEXUS_URL", "http://127.0.0.1:5137").rstrip("/")
 
 _lock = threading.RLock()
 
