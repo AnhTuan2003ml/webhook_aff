@@ -19,6 +19,7 @@ Chạy:  python webhook/aff_webhook.py  (tùy chọn: --port 5001)
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -44,9 +45,13 @@ from link_converter import (  # noqa: E402
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "aff_webhook.json")
 
-# Địa chỉ Nexus (đổi được qua biến môi trường NEXUS_URL nếu cần). Mặc định trùng
-# cổng UI mới của Nexus (5137) — Nexus đã chuyển khỏi 5000 để tránh đụng port.
-NEXUS_URL = os.environ.get("NEXUS_URL", "http://127.0.0.1:5137").rstrip("/")
+# Địa chỉ Nexus. Nếu đặt biến môi trường NEXUS_URL -> luôn dùng giá trị đó. Nếu không,
+# webhook TỰ DÒ cổng Nexus đang chạy: thử 5137 (cổng UI mới) rồi 5000 (bản cũ) để không
+# lệ thuộc phiên bản Nexus nào đang mở -> tránh lỗi "No connection ... refused".
+NEXUS_URL_ENV = os.environ.get("NEXUS_URL", "").rstrip("/")
+NEXUS_PORT_CANDIDATES = [5137, 5000]
+NEXUS_URL = NEXUS_URL_ENV or f"http://127.0.0.1:{NEXUS_PORT_CANDIDATES[0]}"
+_nexus_base_cache = {"url": ""}
 
 _lock = threading.RLock()
 
@@ -198,8 +203,36 @@ class NexusError(RuntimeError):
     pass
 
 
+def _port_open(host: str, port: int, timeout: float = 0.35) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def _nexus_base() -> str:
-    return NEXUS_URL
+    # Env chỉ định -> luôn tôn trọng.
+    if NEXUS_URL_ENV:
+        return NEXUS_URL_ENV
+    # Đã dò được và cổng còn sống -> tái dùng (tránh dò lại mỗi lần gọi).
+    cached = _nexus_base_cache.get("url")
+    if cached:
+        try:
+            port = int(cached.rsplit(":", 1)[-1])
+            if _port_open("127.0.0.1", port):
+                return cached
+        except Exception:
+            pass
+        _nexus_base_cache["url"] = ""
+    # Dò lần lượt các cổng ứng viên.
+    for port in NEXUS_PORT_CANDIDATES:
+        if _port_open("127.0.0.1", port):
+            base = f"http://127.0.0.1:{port}"
+            _nexus_base_cache["url"] = base
+            return base
+    # Không cổng nào mở -> trả mặc định để thông báo lỗi rõ.
+    return f"http://127.0.0.1:{NEXUS_PORT_CANDIDATES[0]}"
 
 
 def _check_nexus_payload(response) -> dict:
@@ -213,13 +246,24 @@ def _check_nexus_payload(response) -> dict:
     return payload
 
 
+def _nexus_conn_error(exc: Exception) -> "NexusError":
+    _nexus_base_cache["url"] = ""   # buộc dò lại cổng ở lần gọi sau
+    if NEXUS_URL_ENV:
+        tried = NEXUS_URL_ENV
+    else:
+        tried = ", ".join(f"127.0.0.1:{p}" for p in NEXUS_PORT_CANDIDATES)
+    return NexusError(
+        f"Không kết nối được Nexus (đã thử {tried}): {exc}. "
+        "Hãy chắc chắn Nexus.exe đang chạy trên cùng máy này."
+    )
+
+
 def nexus_get(path: str, params: dict = None, timeout: int = 60) -> dict:
     try:
         response = requests.get(_nexus_base() + path, params=params or {},
                                 timeout=timeout, proxies=NO_PROXY)
     except Exception as exc:
-        raise NexusError(f"Không kết nối được Nexus ({_nexus_base()}): {exc}. "
-                         "Hãy chắc chắn Nexus.exe đang chạy.")
+        raise _nexus_conn_error(exc)
     return _check_nexus_payload(response)
 
 
@@ -228,8 +272,7 @@ def nexus_post_form(path: str, data: dict, files: dict = None, timeout: int = 12
         response = requests.post(_nexus_base() + path, data=data, files=files,
                                  timeout=timeout, proxies=NO_PROXY)
     except Exception as exc:
-        raise NexusError(f"Không kết nối được Nexus ({_nexus_base()}): {exc}. "
-                         "Hãy chắc chắn Nexus.exe đang chạy.")
+        raise _nexus_conn_error(exc)
     return _check_nexus_payload(response)
 
 
@@ -844,7 +887,7 @@ def api_config():
         db = _load_db()
         if request.method == "GET":
             return jsonify({"success": True, "settings": db["settings"], "stats": db["stats"],
-                            "nexusUrl": NEXUS_URL})
+                            "nexusUrl": _nexus_base()})
         patch = request.get_json(silent=True) or {}
         settings = db["settings"]
         if "enabled" in patch:
@@ -1170,7 +1213,7 @@ def main() -> None:
                 pass
     threading.Thread(target=_worker_loop, daemon=True, name="aff-webhook-worker").start()
     url = f"http://127.0.0.1:{port}/"
-    print(f"[aff_webhook] Dashboard: {url} (Nexus API: {NEXUS_URL})", flush=True)
+    print(f"[aff_webhook] Dashboard: {url} (Nexus API: {_nexus_base()})", flush=True)
     if open_browser:
         threading.Timer(1.0, _open_dashboard_in_edge, args=(url,)).start()
     app.run(host="127.0.0.1", port=port, debug=False)
